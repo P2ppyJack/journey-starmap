@@ -41,56 +41,56 @@ This branch was rebased onto current `main` after the desktop gateway was refact
 
 ## Screenshots
 
-Captures **01–11** were taken against a **fully synthetic sandbox** — invented skills, memories, provider conclusions, and corpus conversations (no real user data). The two multi-profile captures (**12–13**) only render with 2+ profiles selected, so they were taken in multi-profile mode framed tightly on the UI chrome — node labels are not legible and no memory content is shown. Screenshots **01–11** live in `docs/screenshots/` (captured against a fully synthetic sandbox — invented skills, memories, provider conclusions, and corpus conversations, no real user data). Multi-profile captures **12–13** are pending publication.
+Captures **01–11** were taken against a **fully synthetic sandbox** — invented skills, memories, provider conclusions, and corpus conversations (no real user data). The two multi-profile captures (**12–13**) only render with 2+ profiles selected, so they were taken in multi-profile mode framed tightly on the UI chrome — node labels are not legible and no memory content is shown. Screenshots **01–13** live in `docs/screenshots/` (captured against a fully synthetic sandbox — invented skills, memories, provider conclusions, and corpus conversations, no real user data).
 
 ### `/journey` from the composer
 The slash command opens the map (also available in the TUI).
 
-![slash journey](docs/screenshots/01.png)
+![slash journey](docs/screenshots/01-slash-journey-composer.png)
 
 ### The star map
 Skills (blue), file memories (orange), and provider **conclusions** (purple hexagons) on one canvas, with the timeline scrubber, legend, and share controls.
 
-![star map overview](docs/screenshots/02.png)
+![star map overview](docs/screenshots/02-star-map-overview.png)
 
 ### Multi-profile selector (NEW)
 The bot selector in the upper-left merges several profiles' graphs into one map; each node keeps its source-profile badge.
 
-*(multi-profile selector — screenshot pending; multi-profile capture not yet published)*
+![multi-profile selector](docs/screenshots/12-multi-profile-selector.png)
 
 ### Cross-profile insert (NEW)
 Right-click a **memory** or **conclusion** node in a merged multi-profile map → "Insert into &lt;bot&gt;" copies its content into that bot's `MEMORY.md` with an `[Imported from profile: …]` provenance note. (Skills are refused — they aren't a single value.)
 
-*(cross-profile insert — screenshot pending; multi-profile capture not yet published)*
+![cross-profile insert](docs/screenshots/13-cross-profile-insert.png)
 
 ### Search sidebar
 Full-text search across titles and bodies with type/source/date filters, recents, and saved searches.
 
-![search sidebar](docs/screenshots/03.png)
-![search results](docs/screenshots/04.png)
+![search sidebar](docs/screenshots/03-search-sidebar.png)
+![search results](docs/screenshots/04-search-results.png)
 
 ### Conclusion filter
 `Type → conclusions` narrows the map to derived facts; the canvas chip shows the filtered subset with one-click Clear.
 
-![conclusions filter](docs/screenshots/05.png)
+![conclusions filter](docs/screenshots/05-filter-conclusions.png)
 
 ### Node context menu
 One consolidated right-click surface: provenance, recall, add-to-session, start-a-conversation (conclusions), cross-profile insert, and the read-only provider note. Edit/delete appear only for Hermes-owned nodes.
 
-![context menu](docs/screenshots/06.png)
+![context menu](docs/screenshots/06-node-context-menu.png)
 
 ### Provenance drill-down
 "Where this came from…" finds matching Hermes sessions; provider-only knowledge (e.g. imported conversations) explains itself and offers the source corpus.
 
-![provenance](docs/screenshots/07.png)
-![source corpus](docs/screenshots/08.png)
+![provenance](docs/screenshots/07-provenance-sessions.png)
+![source corpus](docs/screenshots/08-source-corpus.png)
 
 ### `/recall`
 Recall mode opens the map as a picker; "Insert into this chat" composes a fenced reference block — clearly labeled as reference data, with connected-node hints — into the composer (or queues it onto another session via "Add to a session").
 
-![recall mode](docs/screenshots/09.png)
-![recall menu](docs/screenshots/10.png)
-![recall inserted](docs/screenshots/11.png)
+![recall mode](docs/screenshots/09-recall-mode.png)
+![recall menu](docs/screenshots/10-recall-menu.png)
+![recall inserted](docs/screenshots/11-recall-inserted-composer.png)
 
 ## What changed
 

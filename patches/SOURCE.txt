@@ -12,7 +12,7 @@ Commits 0001-0005: dd88e3f779, a38440765a, fb37128ddb, f84fc8a7d8, b2de4de4aa
 Canonical dev home: branch feat/journey-provider-memory-nodes on
     https://github.com/P2ppyJack/hermes-agent  (force-pushed; PR #70309 tracks it)
 Screenshots:    captured against a fully synthetic sandbox; also hosted on fork
-    orphan branch pr70309-assets (11 of 13; captures 12-13 pending)
+    orphan branch pr70309-assets (13 of 13 present)
 
 Generated:      2026-08-26 by Hermes agent on Toby's Mac
 Regenerate:     cd ~/.hermes/hermes-agent
