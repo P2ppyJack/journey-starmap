@@ -1,0 +1,1369 @@
+From dd88e3f779307ed2faddaf7eae3ba44706ecc74d Mon Sep 17 00:00:00 2001
+From: P2ppyJack <P2ppyJack@users.noreply.github.com>
+Date: Tue, 11 Aug 2026 20:29:55 -0400
+Subject: [PATCH 1/5] feat(journey): provider memory nodes with session
+ provenance and source-corpus endpoints
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- memory_provider: optional journey_cards / journey_session_messages ABC
+  hooks (safe [] defaults — existing providers unaffected)
+- learning_graph: emit provider-contributed memory cards after MEMORY.md/
+  USER.md entries (append-after invariant tested), recording source +
+  originating session id per card
+- honcho plugin: implement both hooks; auto-paginate conclusions (first
+  page was silently capping the timeline)
+- web_server: GET /api/learning/provider-session/<id> (read corpus) and
+  POST /api/learning/provider-session/<id>/materialize (recreate as a
+  Hermes session; import skips existing ids so re-running is safe)
+- learning_mutations: provider-backed nodes are read-only (edit/delete
+  refused server-side)
+---
+ agent/learning_graph.py                       |  82 ++++-
+ agent/learning_graph_render.py                |   9 +-
+ agent/learning_mutations.py                   | 133 +++++++-
+ agent/memory_provider.py                      |  75 +++++
+ hermes_cli/web_models.py                      |   5 +
+ hermes_cli/web_server.py                      |  93 ++++++
+ plugins/memory/honcho/__init__.py             | 129 ++++++++
+ tests/agent/test_learning_graph.py            | 166 ++++++++++
+ tests/agent/test_learning_mutations.py        |  18 ++
+ .../test_provider_session_materialize.py      | 166 ++++++++++
+ .../memory/test_honcho_journey_cards.py       | 295 ++++++++++++++++++
+ 11 files changed, 1167 insertions(+), 4 deletions(-)
+ create mode 100644 tests/agent/test_provider_session_materialize.py
+ create mode 100644 tests/plugins/memory/test_honcho_journey_cards.py
+
+diff --git a/agent/learning_graph.py b/agent/learning_graph.py
+index b655e3e948..5b65de8d16 100644
+--- a/agent/learning_graph.py
++++ b/agent/learning_graph.py
+@@ -98,6 +98,10 @@ def _to_int_ts(value: Any) -> Optional[int]:
+     try:
+         if value is None:
+             return None
++        if isinstance(value, datetime):
++            if value.tzinfo is None:
++                value = value.replace(tzinfo=timezone.utc)
++            return int(value.timestamp())
+         if isinstance(value, (int, float)):
+             return int(value)
+         s = str(value).strip()
+@@ -190,6 +194,27 @@ def density_stats(nodes: dict[str, SkillNode], edges: list[tuple[str, str]]) ->
+     }
+ 
+ 
++# Bulk importers name provider sessions ``<source>-import-…`` (the ChatGPT
++# importer already does). New import sources inherit origin detection by
++# following the convention — no code change required here.
++_IMPORT_SESSION_RE = re.compile(r"^([a-z0-9]+)-import-", re.IGNORECASE)
++
++
++def _card_origin(entry: dict[str, Any], session_id: str) -> str:
++    """Where a provider entry's knowledge originally came from.
++
++    Extensible by convention, not code: an explicit ``origin`` on the card
++    (future importers/providers) wins, then the ``<source>-import-`` session
++    naming convention, then "hermes" (per-session sync of Hermes-born
++    conversations).
++    """
++    explicit = str(entry.get("origin") or "").strip().lower()
++    if explicit:
++        return explicit
++    m = _IMPORT_SESSION_RE.match(session_id or "")
++    return m.group(1).lower() if m else "hermes"
++
++
+ def _memory_cards() -> list[dict[str, Any]]:
+     """Freeform memory as readable cards.
+ 
+@@ -220,6 +245,55 @@ def _memory_cards() -> list[dict[str, Any]]:
+     return cards
+ 
+ 
++def _provider_memory_cards(limit: int = 10000) -> list[dict[str, Any]]:
++    """Durable entries from the active external memory provider, as cards.
++
++    Providers opt in by implementing ``MemoryProvider.journey_cards()``.
++    Best-effort by contract: no active provider, provider unavailable, hook
++    missing (older provider), backend down, or any error → ``[]``. The
++    journey must render regardless of external-backend health.
++
++    Cards are appended AFTER the file-based cards in the combined list, so
++    ``memory:<source>:<index>`` ids for ``MEMORY.md``/``USER.md`` chunks are
++    unchanged by a provider's presence (mutation index math stays valid).
++    """
++    try:
++        from plugins.memory import _get_active_memory_provider, load_memory_provider
++
++        name = _get_active_memory_provider()
++        if not name:
++            return []
++        provider = load_memory_provider(name)
++        if provider is None or not hasattr(provider, "journey_cards"):
++            return []
++        raw = provider.journey_cards(limit=limit) or []
++    except Exception:
++        return []
++
++    cards: list[dict[str, Any]] = []
++    for entry in raw[:limit]:
++        if not isinstance(entry, dict):
++            continue
++        body = str(entry.get("body") or "").strip()
++        if not body:
++            continue
++        title = str(entry.get("title") or "").strip()
++        if not title:
++            title = body.splitlines()[0].strip()
++        session_id = str(entry.get("session_id") or "").strip()
++        cards.append(
++            {
++                "source": name,
++                "origin": _card_origin(entry, session_id),
++                "timestamp": _to_int_ts(entry.get("timestamp")),
++                "title": (title[:80] + "…") if len(title) > 80 else title,
++                "body": body[:1200],
++                **({"sessionId": session_id} if session_id else {}),
++            }
++        )
++    return cards
++
++
+ def _tokenize(text: str) -> set[str]:
+     return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3}
+ 
+@@ -257,7 +331,9 @@ def build_learning_graph() -> dict[str, Any]:
+     Focus on what is profile-learned and actionable:
+     - skills that are NOT base-installed and show real learning signal
+       (agent-created or used),
+-    - memory chunks as first-class graph nodes connected to those learned skills.
++    - memory chunks as first-class graph nodes connected to those learned skills:
++      built-in ``MEMORY.md``/``USER.md`` cards first, then durable entries from
++      the active external memory provider (``journey_cards()``), when any.
+     """
+     all_skills = build_skill_nodes(_skill_roots())
+     learned_skills = {
+@@ -266,7 +342,7 @@ def build_learning_graph() -> dict[str, Any]:
+         if node.source != "base" and (node.created_by == "agent" or node.use_count > 0)
+     }
+     skill_edges = build_edges(learned_skills)
+-    memory_cards = _memory_cards()
++    memory_cards = _memory_cards() + _provider_memory_cards()
+     memory_edges = _memory_skill_edges(memory_cards, list(learned_skills.values()))
+ 
+     edges = skill_edges + memory_edges
+@@ -297,12 +373,14 @@ def build_learning_graph() -> dict[str, Any]:
+                 "label": card["title"],
+                 "kind": "memory",
+                 "memorySource": card["source"],
++                "origin": card.get("origin") or "hermes",
+                 "timestamp": card.get("timestamp"),
+                 "category": "memory",
+                 "useCount": 0,
+                 "state": "active",
+                 "createdBy": "memory",
+                 "pinned": False,
++                **({"sessionId": card["sessionId"]} if card.get("sessionId") else {}),
+             }
+         )
+ 
+diff --git a/agent/learning_graph_render.py b/agent/learning_graph_render.py
+index 479b2f5b4b..2b1d355936 100644
+--- a/agent/learning_graph_render.py
++++ b/agent/learning_graph_render.py
+@@ -214,7 +214,14 @@ def _node_label(node: dict[str, Any]) -> str:
+ 
+ def _node_meta(node: dict[str, Any]) -> str:
+     if node.get("kind") == "memory":
+-        source = "profile memory" if node.get("memorySource") == "profile" else "memory"
++        mem_source = str(node.get("memorySource") or "memory")
++        if mem_source == "profile":
++            source = "profile memory"
++        elif mem_source == "memory":
++            source = "memory"
++        else:
++            # External memory provider (e.g. "honcho memory").
++            source = f"{mem_source} memory"
+         return f"{source} · {format_date(_to_ts(node.get('timestamp')))}"
+     bits = [str(node.get("category") or "skill"), format_date(_to_ts(node.get("timestamp")))]
+     count = int(node.get("useCount", 0) or 0)
+diff --git a/agent/learning_mutations.py b/agent/learning_mutations.py
+index c723b6153b..407a2bd541 100644
+--- a/agent/learning_mutations.py
++++ b/agent/learning_mutations.py
+@@ -36,8 +36,17 @@ def _memories_dir() -> Path:
+ def _parse_memory_id(node_id: str) -> tuple[str, int]:
+     """``memory:<source>:<index>`` → (source, global_index)."""
+     parts = node_id.split(":", 2)
+-    if len(parts) != 3 or parts[0] != "memory" or parts[1] not in _MEMORY_FILES:
++    if len(parts) != 3 or parts[0] != "memory":
+         raise ValueError(f"bad memory node id: {node_id!r}")
++    if parts[1] not in _MEMORY_FILES:
++        # Nodes contributed by an external memory provider (journey_cards)
++        # carry the provider name as their source. They are read-only here:
++        # their storage lives in the provider's backend, not in a §-file this
++        # module can rewrite.
++        raise ValueError(
++            f"this memory belongs to the '{parts[1]}' memory provider and is "
++            f"read-only in the journey — manage it with the provider's own tools"
++        )
+     try:
+         return parts[1], int(parts[2])
+     except ValueError as exc:
+@@ -186,6 +195,128 @@ def _edit_memory(node_id: str, content: str) -> dict[str, Any]:
+     return {"ok": True, "message": f"updated memory in {path.name}"}
+ 
+ 
++# ── Materialize a provider session as a Hermes session ─────────────────────
++
++
++def build_provider_session_import(
++    session_id: str, limit: int = 2000
++) -> dict[str, Any]:
++    """Shape a provider-side conversation into an ``import_sessions`` payload.
++
++    The journey's "recreate this conversation" action: pulls the raw corpus
++    behind a provider-contributed node (``journey_session_messages``) and
++    returns a session dict ready for ``SessionDB.import_sessions`` — the same
++    validated path the dashboard's session-import uses, so limits, FK safety
++    and skip-existing idempotency all apply unchanged.
++
++    Design points:
++
++    - **Stable id** — the Hermes session id IS the provider session id. For
++      Hermes-born memories (per-session sync names the Honcho session after
++      the Hermes session) this resurrects a deleted conversation under its
++      original id; for imported history (``chatgpt-import-…``) the id is
++      deterministic, so recreating twice imports once and opens the same
++      session thereafter (import skips existing ids).
++    - **Role mapping** — providers that know which peer is the human send
++      ``role`` per message (the Honcho plugin does); otherwise the first
++      message's peer is assumed to be the user. Unattributed messages follow
++      the previous turn's role.
++    - **Alternation-safe** — consecutive same-role messages are merged so a
++      recreated session can be *continued* without violating the strict
++      user/assistant alternation contract.
++    - **Provenance preserved** — original message timestamps carry over;
++      ``started_at`` is the first message's time; ``source`` marks the
++      session as journey-recreated without hiding it from session lists.
++    """
++    sid = str(session_id or "").strip()
++    if not sid:
++        return {"ok": False, "message": "session_id is required"}
++
++    try:
++        from plugins.memory import _get_active_memory_provider, load_memory_provider
++    except Exception:
++        return {"ok": False, "message": "memory provider framework unavailable"}
++
++    provider_name = _get_active_memory_provider()
++    if not provider_name:
++        return {"ok": False, "message": "no active memory provider"}
++    provider = load_memory_provider(provider_name)
++    if provider is None or not hasattr(provider, "journey_session_messages"):
++        return {
++            "ok": False,
++            "message": f"provider '{provider_name}' does not expose session corpora",
++        }
++
++    safe_limit = max(1, min(int(limit or 2000), 10_000))
++    raw = provider.journey_session_messages(sid, limit=safe_limit) or []
++
++    from agent.learning_graph import _to_int_ts
++
++    shaped: list[dict[str, Any]] = []
++    first_peer: str | None = None
++    prev_role = "assistant"  # an unattributed opener defaults to user via first_peer
++    for m in raw:
++        if not isinstance(m, dict):
++            continue
++        content = str(m.get("content") or "")
++        if not content.strip():
++            continue
++        peer = str(m.get("peer") or "")
++        if first_peer is None and peer:
++            first_peer = peer
++        role = m.get("role")
++        if role not in ("user", "assistant"):
++            if peer and first_peer:
++                role = "user" if peer == first_peer else "assistant"
++            else:
++                role = "user" if prev_role == "assistant" else "assistant"
++        prev_role = role
++        ts = _to_int_ts(m.get("timestamp"))
++        if shaped and shaped[-1]["role"] == role:
++            # Merge consecutive same-role turns (alternation contract).
++            shaped[-1]["content"] += "\n\n" + content
++            if ts is not None and shaped[-1].get("timestamp") is None:
++                shaped[-1]["timestamp"] = ts
++        else:
++            shaped.append({"role": role, "content": content, "timestamp": ts})
++
++    if not shaped:
++        return {
++            "ok": False,
++            "message": (
++                "no source data available — the memory backend is unreachable "
++                "or no longer holds this session"
++            ),
++        }
++
++    timestamps = [m["timestamp"] for m in shaped if m.get("timestamp") is not None]
++    started_at = float(min(timestamps)) if timestamps else None
++
++    title = ""
++    for m in shaped:
++        if m["role"] == "user":
++            title = m["content"].strip().splitlines()[0].strip()
++            break
++    if len(title) > 72:
++        title = title[:72].rstrip() + "…"
++    if not title:
++        title = sid
++
++    session = {
++        "id": sid,
++        "source": f"journey:{provider_name}",
++        "title": title,
++        "messages": shaped,
++        **({"started_at": started_at} if started_at is not None else {}),
++    }
++    return {
++        "ok": True,
++        "provider": provider_name,
++        "session": session,
++        "message_count": len(shaped),
++    }
++
++
+ # ── Helpers ─────────────────────────────────────────────────────────────────
+ 
+ 
+diff --git a/agent/memory_provider.py b/agent/memory_provider.py
+index 317ad73d5a..84df6bc3da 100644
+--- a/agent/memory_provider.py
++++ b/agent/memory_provider.py
+@@ -402,3 +402,78 @@ class MemoryProvider(ABC):
+         from config/env only. Default returns an empty list (nothing external).
+         """
+         return []
++
++    def journey_cards(self, limit: int = 200) -> List[Dict[str, Any]]:
++        """Return durable memory entries for the learning-journey graph.
++
++        The journey surfaces (``hermes journey``, the TUI ``/journey``
++        overlay, and the desktop Star Map) render what the agent has learned
++        over time. By default that graph only sees built-in memory
++        (``MEMORY.md`` / ``USER.md``); implementing this hook lets an external
++        provider's durable facts appear alongside them as first-class
++        memory nodes.
++
++        Each card is a dict with:
++
++        - ``body`` (str, required): the fact/entry text.
++        - ``title`` (str, optional): short label; defaults to the body's
++          first line.
++        - ``timestamp`` (optional): unix seconds, ISO-8601 string, or a
++          ``datetime`` — when the entry was learned. ``None`` is allowed
++          (the node renders without a date bucket).
++        - ``session_id`` (str, optional): the provider-side session this
++          entry was derived from, when known. Journey surfaces use it two
++          ways: resolving the originating Hermes conversation (when the
++          provider's session naming maps onto Hermes session ids) and
++          fetching the source corpus via ``journey_session_messages``.
++
++        Contract:
++
++        - MUST be callable without ``initialize()`` — journey views run
++          outside any chat session. Resolve config/credentials yourself.
++        - MUST be best-effort and non-fatal: backend down, not configured,
++          or any error → return ``[]`` (never raise). Journey rendering
++          must never break because a memory backend is unreachable.
++        - SHOULD be fast: called from interactive UI paths. Cap work at
++          ``limit`` entries and use short network timeouts.
++        - Cards are READ-ONLY in the journey: edit/delete for provider
++          nodes is refused and points users at the provider's own tools.
++
++        Default returns an empty list (provider contributes nothing).
++        """
++        return []
++
++    def journey_session_messages(
++        self, session_id: str, limit: int = 500
++    ) -> List[Dict[str, Any]]:
++        """Return the raw source messages of one provider-side session.
++
++        Journey surfaces call this when the user asks to read the original
++        corpus a ``journey_cards`` entry was derived from (the card's
++        ``session_id``). This covers provider-only history — e.g. imported
++        conversations that never existed as Hermes sessions — where the
++        provider backend is the only place the source data lives.
++
++        Each message is a dict with:
++
++        - ``content`` (str, required): the message text.
++        - ``peer`` (str, optional): who authored it (provider peer id).
++        - ``role`` (str, optional): ``"user"`` or ``"assistant"`` when the
++          provider can tell which peer is the human. Used when the corpus is
++          materialized back into a Hermes session; consumers fall back to a
++          first-peer-is-user heuristic when absent.
++        - ``timestamp`` (optional): unix seconds, ISO-8601 string, or a
++          ``datetime`` — when the message was created.
++
++        Contract mirrors ``journey_cards``:
++
++        - MUST be callable without ``initialize()`` — resolve config and
++          credentials yourself.
++        - MUST be best-effort and non-fatal: unknown session, backend down,
++          or any error → return ``[]`` (never raise).
++        - SHOULD be fast and bounded: return at most ``limit`` messages in
++          chronological order and use short network timeouts.
++
++        Default returns an empty list (no corpus available).
++        """
++        return []
+diff --git a/hermes_cli/web_models.py b/hermes_cli/web_models.py
+index 2a44cfef08..b1b773ffba 100644
+--- a/hermes_cli/web_models.py
++++ b/hermes_cli/web_models.py
+@@ -283,6 +283,11 @@ class LearningNodeRef(BaseModel):
+     profile: Optional[str] = None
+ 
+ 
++class ProviderSessionMaterialize(BaseModel):
++    session_id: str
++    profile: Optional[str] = None
++
++
+ class LearningNodeEdit(BaseModel):
+     id: str
+     content: str
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index a7dd5fe4b0..edb3a27777 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -1527,6 +1527,7 @@ from hermes_cli.web_models import (  # noqa: F401
+     CuratorPause,
+     LearningNodeRef,
+     LearningNodeEdit,
++    ProviderSessionMaterialize,
+     DebugShareRequest,
+     TTSSpeakRequest,
+     OAuthSubmitBody,
+@@ -4205,6 +4206,98 @@ async def update_learning_node(body: LearningNodeEdit):
+     return res
+ 
+ 
++@app.get("/api/learning/provider-session")
++async def get_learning_provider_session(
++    session_id: str, limit: int = 500, profile: Optional[str] = None
++):
++    """Source corpus behind a provider-contributed journey node.
++
++    Proxies the active memory provider's ``journey_session_messages`` hook —
++    the raw provider-side conversation a derived fact (e.g. a Honcho
++    conclusion) came from. Best-effort by the hook's contract: no provider,
++    unknown session, or backend down → empty message list, not an error.
++    """
++    def _read():
++        from plugins.memory import _get_active_memory_provider, load_memory_provider
++
++        name = _get_active_memory_provider()
++        if not name:
++            return None, []
++        provider = load_memory_provider(name)
++        if provider is None or not hasattr(provider, "journey_session_messages"):
++            return name, []
++        safe_limit = max(1, min(int(limit or 500), 2000))
++        raw = provider.journey_session_messages(session_id, limit=safe_limit) or []
++        from agent.learning_graph import _to_int_ts
++
++        messages = []
++        for m in raw:
++            if not isinstance(m, dict):
++                continue
++            content = str(m.get("content") or "")
++            if not content.strip():
++                continue
++            messages.append({
++                "content": content,
++                "peer": str(m.get("peer") or ""),
++                "timestamp": _to_int_ts(m.get("timestamp")),
++            })
++        return name, messages
++
++    try:
++        with _profile_scope(profile):
++            name, messages = await asyncio.to_thread(_read)
++    except Exception:
++        _log.exception("GET /api/learning/provider-session failed")
++        raise HTTPException(status_code=500, detail="Failed to load provider session")
++    return {"provider": name, "session_id": session_id, "messages": messages}
++
++
++@app.post("/api/learning/provider-session/materialize")
++async def materialize_learning_provider_session(body: ProviderSessionMaterialize):
++    """Recreate a provider-side conversation as a real Hermes session.
++
++    Journey drill-down action: the source corpus behind a provider node
++    (e.g. imported ChatGPT history in Honcho, or a Hermes conversation whose
++    row was deleted but whose sync copy survives in the provider) is shaped
++    by ``build_provider_session_import`` and written through the standard
++    session-import path. Import skips existing ids, so this is idempotent:
++    recreating an already-materialized conversation just returns its id with
++    ``created: false`` and the UI opens the existing session.
++    """
++    def _materialize():
++        from agent.learning_mutations import build_provider_session_import
++
++        with _profile_scope(body.profile):
++            built = build_provider_session_import(body.session_id)
++        if not built.get("ok"):
++            return built
++        result = _import_sessions_for_profile(body.profile, [built["session"]])
++        errors = result.get("errors") or []
++        if errors:
++            return {
++                "ok": False,
++                "message": str(errors[0].get("error", "import failed")),
++            }
++        return {
++            "ok": True,
++            "provider": built.get("provider"),
++            "session_id": built["session"]["id"],
++            "title": built["session"].get("title") or "",
++            "message_count": built.get("message_count", 0),
++            "created": bool(result.get("imported")),
++        }
++
++    try:
++        res = await asyncio.to_thread(_materialize)
++    except Exception:
++        _log.exception("POST /api/learning/provider-session/materialize failed")
++        raise HTTPException(status_code=500, detail="Failed to materialize provider session")
++    if not res.get("ok"):
++        raise HTTPException(status_code=400, detail=res.get("message", "materialize failed"))
++    return res
++
++
+ def _safe_call(mod, fn_name: str, default):
+     try:
+         fn = getattr(mod, fn_name, None)
+diff --git a/plugins/memory/honcho/__init__.py b/plugins/memory/honcho/__init__.py
+index 1347014cea..dbe88e05cd 100644
+--- a/plugins/memory/honcho/__init__.py
++++ b/plugins/memory/honcho/__init__.py
+@@ -275,6 +275,135 @@ class HonchoMemoryProvider(MemoryProvider):
+             pass
+         return paths
+ 
++    def journey_cards(self, limit: int = 10000) -> List[Dict[str, Any]]:
++        """Conclusions about the user peer, for the learning-journey graph.
++
++        Conclusions are Honcho's durable derived facts — the closest analog
++        to a MEMORY.md entry — each carrying a server ``created_at``, which
++        is exactly what the journey timeline buckets on.
++
++        Session-independent by contract: resolves config and builds the SDK
++        client directly (``get_honcho_client`` handles OAuth refresh, local
++        placeholder keys, and the configured request timeout), never touching
++        the session manager. Both observer scopes are read — the user's
++        self-conclusions and the AI peer's conclusions about the user — since
++        ``observation_mode`` routing (see ``_conclusions_scope``) means either
++        may hold the facts. Any failure → ``[]``, per the ABC contract.
++        """
++        try:
++            from .client import HonchoClientConfig, get_honcho_client
++
++            cfg = HonchoClientConfig.from_global_config()
++            if not cfg.enabled or not cfg.peer_name:
++                return []
++            client = get_honcho_client(cfg)
++            user_id = cfg.peer_name
++            cards: List[Dict[str, Any]] = []
++            seen: set = set()
++            for observer_id in dict.fromkeys((user_id, cfg.ai_peer)):
++                if len(cards) >= limit:
++                    break
++                try:
++                    scope = client.peer(observer_id).conclusions_of(user_id)
++                    # Iterating the page object auto-paginates (SyncPage) —
++                    # .items alone would silently cap the scope at one page
++                    # and hide older conclusions (e.g. a bulk history import)
++                    # from the timeline. The early break stops lazy fetches.
++                    page_iter = scope.list(size=100)
++                except Exception:
++                    continue  # one scope failing must not hide the other
++                try:
++                    for c in page_iter:
++                        content = str(getattr(c, "content", "") or "").strip()
++                        cid = getattr(c, "id", None)
++                        if not content or (cid and cid in seen):
++                            continue
++                        if cid:
++                            seen.add(cid)
++                        cards.append({
++                            "body": content,
++                            "timestamp": getattr(c, "created_at", None),
++                            "session_id": getattr(c, "session_id", None),
++                        })
++                        if len(cards) >= limit:
++                            break
++                except Exception:
++                    continue  # mid-pagination failure keeps what we have
++            return cards
++        except Exception:
++            return []
++
++    def journey_session_messages(
++        self, session_id: str, limit: int = 500
++    ) -> List[Dict[str, Any]]:
++        """Raw messages of one Honcho session — the corpus behind a conclusion.
++
++        Session-independent by contract (same as ``journey_cards``): builds
++        the SDK client directly and never touches the session manager. The
++        SDK's ``client.session(id)`` is get-or-create, so an unknown id would
++        CREATE an empty session server-side — guard by probing the workspace
++        session list for the id first. Any failure → ``[]``.
++        """
++        sid = str(session_id or "").strip()
++        if not sid:
++            return []
++        try:
++            from .client import HonchoClientConfig, get_honcho_client
++
++            cfg = HonchoClientConfig.from_global_config()
++            if not cfg.enabled:
++                return []
++            client = get_honcho_client(cfg)
++
++            # Existence probe: sessions() lists without creating. filters use
++            # the public API's id key; fall back to a bounded scan when the
++            # filtered call errors (older server without id filters).
++            exists = False
++            try:
++                for s in client.sessions({"id": sid}, size=1):
++                    if str(getattr(s, "id", "")) == sid:
++                        exists = True
++                    break
++            except Exception:
++                try:
++                    scanned = 0
++                    for s in client.sessions(size=100):
++                        if str(getattr(s, "id", "")) == sid:
++                            exists = True
++                            break
++                        scanned += 1
++                        if scanned >= 2000:
++                            break
++                except Exception:
++                    return []
++            if not exists:
++                return []
++
++            session = client.session(sid)
++            out: List[Dict[str, Any]] = []
++            user_peer = str(cfg.peer_name or "")
++            for m in session.messages(size=min(100, max(1, limit))):
++                content = str(getattr(m, "content", "") or "")
++                if not content.strip():
++                    continue
++                peer = str(getattr(m, "peer_id", "") or "")
++                out.append({
++                    "content": content,
++                    "peer": peer,
++                    # Honcho knows which peer is the human: the configured
++                    # user peer. Everything else (hermes, chatgpt, any other
++                    # AI peer) speaks as the assistant. Downstream consumers
++                    # (session materialization) rely on this instead of
++                    # guessing from peer names.
++                    "role": "user" if user_peer and peer == user_peer else "assistant",
++                    "timestamp": getattr(m, "created_at", None),
++                })
++                if len(out) >= limit:
++                    break
++            return out
++        except Exception:
++            return []
++
+     def __init__(self, query_rewriter: Optional[Callable[[str], str]] = None):
+         self._manager = None   # HonchoSessionManager
+         self._config = None    # HonchoClientConfig
+diff --git a/tests/agent/test_learning_graph.py b/tests/agent/test_learning_graph.py
+index 3049273735..fd6ef90876 100644
+--- a/tests/agent/test_learning_graph.py
++++ b/tests/agent/test_learning_graph.py
+@@ -79,3 +79,169 @@ def test_full_payload_shape_and_edge_integrity(tmp_path):
+     assert graph["stats"]["nodes"] == len(skill_nodes)
+     assert graph["stats"]["memory_nodes"] == len(graph["memory"])
+     assert all("timestamp" in n for n in graph["nodes"])
++
++
++# ── External provider memory (journey_cards) ────────────────────────────────
++
++
++class _FakeProvider:
++    def __init__(self, cards):
++        self._cards = cards
++
++    def journey_cards(self, limit=200):
++        return self._cards[:limit]
++
++
++class _LegacyProvider:
++    """A provider written before journey_cards existed — no such attribute."""
++
++
++def _patch_active_provider(monkeypatch, name, provider):
++    import plugins.memory as pm
++
++    monkeypatch.setattr(pm, "_get_active_memory_provider", lambda: name)
++    monkeypatch.setattr(pm, "load_memory_provider", lambda n: provider)
++
++
++def test_provider_cards_normalized_and_tagged_with_provider_name(monkeypatch):
++    _patch_active_provider(
++        monkeypatch,
++        "fakemem",
++        _FakeProvider(
++            [
++                {"body": "User prefers rye bread", "timestamp": 1_770_000_000},
++                {"body": "line one\nline two", "timestamp": "2026-04-30T12:00:00+00:00"},
++                {"body": ""},          # dropped: empty body
++                "not-a-dict",           # dropped: wrong shape
++            ]
++        ),
++    )
++
++    cards = learning_graph._provider_memory_cards()
++
++    assert [c["source"] for c in cards] == ["fakemem", "fakemem"]
++    assert cards[0]["body"] == "User prefers rye bread"
++    assert cards[0]["title"] == "User prefers rye bread"
++    assert cards[0]["timestamp"] == 1_770_000_000
++    # Title defaults to the first line; ISO timestamps normalize to unix secs.
++    assert cards[1]["title"] == "line one"
++    assert cards[1]["timestamp"] == 1_777_550_400
++
++
++def test_provider_cards_empty_when_no_provider_or_legacy_or_raising(monkeypatch):
++    import plugins.memory as pm
++
++    # No active provider configured.
++    monkeypatch.setattr(pm, "_get_active_memory_provider", lambda: None)
++    assert learning_graph._provider_memory_cards() == []
++
++    # Older provider without the hook.
++    _patch_active_provider(monkeypatch, "oldmem", _LegacyProvider())
++    assert learning_graph._provider_memory_cards() == []
++
++    # Provider whose hook raises (backend down) must not propagate.
++    class _Boom:
++        def journey_cards(self, limit=200):
++            raise RuntimeError("backend down")
++
++    _patch_active_provider(monkeypatch, "boommem", _Boom())
++    assert learning_graph._provider_memory_cards() == []
++
++
++def test_provider_cards_append_after_file_cards(tmp_path, monkeypatch):
++    """Provider nodes must not shift MEMORY.md/USER.md indices — the mutation
++    module's ``memory:<source>:<index>`` math depends on file cards first."""
++    home = tmp_path / ".hermes"
++    (home / "memories").mkdir(parents=True)
++    (home / "memories" / "MEMORY.md").write_text("file fact", encoding="utf-8")
++    _patch_active_provider(
++        monkeypatch, "fakemem", _FakeProvider([{"body": "provider fact"}])
++    )
++
++    token = set_hermes_home_override(home)
++    try:
++        graph = learning_graph.build_learning_graph()
++    finally:
++        reset_hermes_home_override(token)
++
++    sources = [c["source"] for c in graph["memory"]]
++    assert sources.index("memory") < sources.index("fakemem")
++    # Provider node exists, carries provider source, and is memory-kind.
++    node = next(n for n in graph["nodes"] if n["memorySource"] == "fakemem")
++    assert node["kind"] == "memory"
++    assert node["label"] == "provider fact"
++    # Node ids stay positional over the combined list.
++    assert node["id"] == f"memory:fakemem:{sources.index('fakemem')}"
++    # Cluster count covers file + provider cards alike.
++    mem_cluster = next(c for c in graph["clusters"] if c["category"] == "memory")
++    assert mem_cluster["count"] == len(graph["memory"]) == 2
++
++
++def test_provider_session_provenance_reaches_graph_nodes(tmp_path, monkeypatch):
++    """A provider card's session_id must surface as ``sessionId`` on its graph
++    node (the journey drill-down resolves the originating conversation from
++    it), while cards without one — and file-based memory — stay bare."""
++    home = tmp_path / ".hermes"
++    (home / "memories").mkdir(parents=True)
++    (home / "memories" / "MEMORY.md").write_text("file fact", encoding="utf-8")
++    _patch_active_provider(
++        monkeypatch,
++        "fakemem",
++        _FakeProvider(
++            [
++                {"body": "sourced fact", "session_id": "20260101_000000_abc123"},
++                {"body": "orphan fact", "session_id": None},
++            ]
++        ),
++    )
++
++    token = set_hermes_home_override(home)
++    try:
++        graph = learning_graph.build_learning_graph()
++    finally:
++        reset_hermes_home_override(token)
++
++    by_label = {n["label"]: n for n in graph["nodes"] if n["kind"] == "memory"}
++    assert by_label["sourced fact"]["sessionId"] == "20260101_000000_abc123"
++    assert "sessionId" not in by_label["orphan fact"]
++    assert "sessionId" not in by_label["file fact"]
++
++
++def test_card_origin_detection():
++    """Origin is extensible by convention: explicit `origin` field wins, then
++    the `<source>-import-…` session-id convention (any future importer that
++    follows it — claude, gemini — needs zero code changes), else hermes."""
++    origin = learning_graph._card_origin
++
++    # Convention: session id prefix names the import source.
++    assert origin({}, "chatgpt-import-6a2593e8") == "chatgpt"
++    assert origin({}, "claude-import-abc") == "claude"
++    assert origin({}, "gemini2-import-xyz") == "gemini2"
++
++    # Hermes-born (per-session sync uses the Hermes session id).
++    assert origin({}, "20260707_232752_9533a6") == "hermes"
++    assert origin({}, "") == "hermes"
++
++    # Explicit origin on the card overrides everything.
++    assert origin({"origin": "Notion"}, "20260707_232752_9533a6") == "notion"
++    assert origin({"origin": "slack"}, "chatgpt-import-abc") == "slack"
++
++
++def test_provider_cards_carry_origin(monkeypatch):
++    _patch_active_provider(
++        monkeypatch,
++        "honcho",
++        _FakeProvider(
++            [
++                {"body": "imported fact", "session_id": "chatgpt-import-42"},
++                {"body": "hermes fact", "session_id": "20260101_000000_abc123"},
++                {"body": "orphan fact"},
++            ]
++        ),
++    )
++
++    by_body = {c["body"]: c for c in learning_graph._provider_memory_cards()}
++
++    assert by_body["imported fact"]["origin"] == "chatgpt"
++    assert by_body["hermes fact"]["origin"] == "hermes"
++    assert by_body["orphan fact"]["origin"] == "hermes"
+diff --git a/tests/agent/test_learning_mutations.py b/tests/agent/test_learning_mutations.py
+index 7d2ef8d963..f2298c458b 100644
+--- a/tests/agent/test_learning_mutations.py
++++ b/tests/agent/test_learning_mutations.py
+@@ -91,3 +91,21 @@ def test_memory_writes_match_memory_tool_format(home):
+ 
+     assert entries == ["alpha rewritten", "beta note"]
+     assert path.read_text(encoding="utf-8") == ENTRY_DELIMITER.join(entries)
++
++
++def test_provider_memory_nodes_are_read_only(home):
++    """Nodes contributed by an external memory provider (journey_cards) are
++    stored in the provider's backend, not a §-file — edit/delete/detail must
++    refuse with a message that names the provider instead of corrupting
++    MEMORY.md/USER.md index math."""
++    for op in (
++        lambda: lm.node_detail("memory:honcho:5"),
++        lambda: lm.delete_node("memory:honcho:5"),
++        lambda: lm.edit_node("memory:honcho:5", "new text"),
++    ):
++        result = op()
++        assert result["ok"] is False
++        assert "honcho" in result["message"]
++        assert "read-only" in result["message"]
++    # Files untouched.
++    assert "alpha note" in (home / "memories" / "MEMORY.md").read_text(encoding="utf-8")
+diff --git a/tests/agent/test_provider_session_materialize.py b/tests/agent/test_provider_session_materialize.py
+new file mode 100644
+index 0000000000..233b91f47b
+--- /dev/null
++++ b/tests/agent/test_provider_session_materialize.py
+@@ -0,0 +1,166 @@
++"""build_provider_session_import — journey "recreate this conversation".
++
++Covers the corpus→import_sessions transform: role mapping (explicit provider
++roles, first-peer heuristic, alternation fallback), same-role merging, the
++stable-id/idempotency contract, timestamp provenance, and the end-to-end
++write through SessionDB.import_sessions.
++"""
++
++from types import SimpleNamespace
++
++import pytest
++
++import agent.learning_mutations as lm
++
++
++class _FakeProvider:
++    def __init__(self, messages):
++        self._messages = messages
++        self.calls = []
++
++    def journey_session_messages(self, session_id, limit=500):
++        self.calls.append((session_id, limit))
++        return self._messages
++
++
++def _wire(monkeypatch, provider, name="honcho"):
++    import plugins.memory as pm
++
++    monkeypatch.setattr(pm, "_get_active_memory_provider", lambda: name)
++    monkeypatch.setattr(pm, "load_memory_provider", lambda n: provider)
++
++
++def _msg(content, peer="toby", role=None, timestamp=None):
++    out = {"content": content, "peer": peer, "timestamp": timestamp}
++    if role is not None:
++        out["role"] = role
++    return out
++
++
++# ── Transform ────────────────────────────────────────────────────────────────
++
++
++def test_explicit_roles_win(monkeypatch):
++    _wire(monkeypatch, _FakeProvider([
++        _msg("q1", peer="toby", role="user", timestamp=1700000000),
++        _msg("a1", peer="chatgpt", role="assistant", timestamp=1700000060),
++    ]))
++
++    res = lm.build_provider_session_import("chatgpt-import-abc")
++
++    assert res["ok"]
++    s = res["session"]
++    assert s["id"] == "chatgpt-import-abc"
++    assert [m["role"] for m in s["messages"]] == ["user", "assistant"]
++    assert s["source"] == "journey:honcho"
++
++
++def test_first_peer_heuristic_when_roles_absent(monkeypatch):
++    """Providers without role attribution: whoever speaks first is the user."""
++    _wire(monkeypatch, _FakeProvider([
++        _msg("q", peer="someone"),
++        _msg("a", peer="bot"),
++        _msg("q2", peer="someone"),
++    ]))
++
++    res = lm.build_provider_session_import("sess")
++
++    assert [m["role"] for m in res["session"]["messages"]] == [
++        "user", "assistant", "user",
++    ]
++
++
++def test_consecutive_same_role_messages_merge(monkeypatch):
++    """Two user turns in a row must merge — a recreated session is continued
++    live, and the conversation loop enforces strict role alternation."""
++    _wire(monkeypatch, _FakeProvider([
++        _msg("part one", role="user", timestamp=100),
++        _msg("part two", role="user", timestamp=200),
++        _msg("answer", role="assistant", timestamp=300),
++        _msg("answer cont.", role="assistant"),
++    ]))
++
++    msgs = lm.build_provider_session_import("sess")["session"]["messages"]
++
++    assert [m["role"] for m in msgs] == ["user", "assistant"]
++    assert msgs[0]["content"] == "part one\n\npart two"
++    assert msgs[1]["content"] == "answer\n\nanswer cont."
++    # Merged turn keeps the earliest timestamp it saw.
++    assert msgs[0]["timestamp"] == 100
++
++
++def test_timestamps_and_title(monkeypatch):
++    _wire(monkeypatch, _FakeProvider([
++        _msg("How do I plant tomatoes in clay soil?", role="user", timestamp=1690000500),
++        _msg("Start with compost.", role="assistant", timestamp=1690000560),
++    ]))
++
++    res = lm.build_provider_session_import("sess")
++    s = res["session"]
++
++    assert s["started_at"] == 1690000500
++    assert s["title"] == "How do I plant tomatoes in clay soil?"
++    assert s["messages"][0]["timestamp"] == 1690000500
++
++
++def test_empty_corpus_fails_cleanly(monkeypatch):
++    _wire(monkeypatch, _FakeProvider([]))
++    res = lm.build_provider_session_import("gone")
++    assert not res["ok"]
++    assert "no source data" in res["message"]
++
++
++def test_no_active_provider(monkeypatch):
++    import plugins.memory as pm
++
++    monkeypatch.setattr(pm, "_get_active_memory_provider", lambda: None)
++    res = lm.build_provider_session_import("sess")
++    assert not res["ok"]
++
++
++def test_blank_session_id():
++    assert not lm.build_provider_session_import("  ")["ok"]
++
++
++# ── End-to-end through SessionDB.import_sessions ────────────────────────────
++
++
++@pytest.fixture()
++def session_db(tmp_path):
++    from hermes_state import SessionDB
++
++    db = SessionDB(db_path=tmp_path / "state.db")
++    yield db
++    db.close()
++
++
++def test_materialized_payload_imports_and_is_idempotent(monkeypatch, session_db):
++    """The built payload must be accepted verbatim by import_sessions, and a
++    second materialization of the same provider session must skip (stable id
++    == never-clobber): re-recreating opens the existing session instead of
++    duplicating it."""
++    _wire(monkeypatch, _FakeProvider([
++        _msg("original question", role="user", timestamp=1690000000),
++        _msg("original answer", role="assistant", timestamp=1690000060),
++    ]))
++
++    built = lm.build_provider_session_import("chatgpt-import-e2e")
++    assert built["ok"]
++
++    first = session_db.import_sessions([built["session"]])
++    assert first["imported"] == 1 and not first["errors"]
++
++    # Same conversation again → skipped, not duplicated.
++    again = lm.build_provider_session_import("chatgpt-import-e2e")
++    second = session_db.import_sessions([again["session"]])
++    assert second["imported"] == 0
++    assert second["skipped"] == 1
++
++    msgs = session_db.get_messages("chatgpt-import-e2e")
++    roles = [(m["role"], m["content"]) for m in msgs]
++    assert roles == [
++        ("user", "original question"),
++        ("assistant", "original answer"),
++    ]
++    # Original provenance timestamp survived the import.
++    assert abs(msgs[0]["timestamp"] - 1690000000) < 1
+diff --git a/tests/plugins/memory/test_honcho_journey_cards.py b/tests/plugins/memory/test_honcho_journey_cards.py
+new file mode 100644
+index 0000000000..a8fa612296
+--- /dev/null
++++ b/tests/plugins/memory/test_honcho_journey_cards.py
+@@ -0,0 +1,295 @@
++"""Behavior contracts for HonchoMemoryProvider.journey_cards().
++
++journey_cards() is the session-independent hook the learning-journey graph
++calls to surface Honcho conclusions as memory nodes. Contract under test:
++
++- reads conclusions from BOTH observer scopes (user self-conclusions and the
++  AI peer's conclusions about the user), deduped by server id,
++- normalizes to {body, timestamp} cards,
++- is best-effort: unconfigured, SDK missing, or backend errors → [] (never
++  raises) — the journey must render regardless of backend health.
++
++The Honcho SDK is faked at the client boundary (get_honcho_client), the same
++seam the real code resolves through; no network.
++"""
++
++from __future__ import annotations
++
++from datetime import datetime, timezone
++from types import SimpleNamespace
++
++import pytest
++
++from plugins.memory.honcho import HonchoMemoryProvider
++from plugins.memory.honcho import client as client_mod
++
++
++class _FakeScope:
++    def __init__(self, items, page_size_cap=None):
++        self._items = items
++        self._page_size_cap = page_size_cap
++
++    def list(self, size=100):
++        """Mimic the SDK's SyncPage: iterating it walks ALL items across
++        pages (auto-pagination), regardless of the per-page ``size``."""
++        if self._page_size_cap is not None:
++            assert size <= self._page_size_cap
++        return iter(self._items)
++
++
++class _FakePeer:
++    def __init__(self, scopes):
++        self._scopes = scopes
++
++    def conclusions_of(self, target):
++        return self._scopes.get(target, _FakeScope([]))
++
++
++class _FakeClient:
++    def __init__(self, peers):
++        self._peers = peers
++
++    def peer(self, peer_id):
++        return self._peers.get(peer_id, _FakePeer({}))
++
++
++def _conclusion(cid, content, created_at=None, session_id=None):
++    return SimpleNamespace(
++        id=cid,
++        content=content,
++        created_at=created_at or datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc),
++        session_id=session_id,
++    )
++
++
++def _set_config(monkeypatch, enabled=True, peer_name: str | None = "alice", ai_peer="hermes"):
++    cfg = SimpleNamespace(enabled=enabled, peer_name=peer_name, ai_peer=ai_peer)
++    monkeypatch.setattr(
++        client_mod.HonchoClientConfig,
++        "from_global_config",
++        classmethod(lambda cls, **kw: cfg),
++    )
++    return cfg
++
++
++def _set_client(monkeypatch, client):
++    monkeypatch.setattr(client_mod, "get_honcho_client", lambda cfg: client)
++
++
++@pytest.fixture
++def provider(monkeypatch):
++    _set_config(monkeypatch)
++    return HonchoMemoryProvider()
++
++
++def test_reads_both_observer_scopes_and_dedupes(provider, monkeypatch):
++    shared = _conclusion("dup-1", "seen by both observers")
++    client = _FakeClient(
++        {
++            "alice": _FakePeer({"alice": _FakeScope([
++                shared,
++                _conclusion("a-1", "alice self-fact"),
++            ])}),
++            "hermes": _FakePeer({"alice": _FakeScope([
++                shared,
++                _conclusion("h-1", "hermes-observed fact"),
++            ])}),
++        }
++    )
++    _set_client(monkeypatch, client)
++
++    cards = provider.journey_cards()
++
++    bodies = [c["body"] for c in cards]
++    assert bodies.count("seen by both observers") == 1  # deduped by id
++    assert "alice self-fact" in bodies
++    assert "hermes-observed fact" in bodies
++    assert all(isinstance(c["timestamp"], datetime) for c in cards)
++
++
++def test_one_scope_failing_does_not_hide_the_other(provider, monkeypatch):
++    class _BoomPeer:
++        def conclusions_of(self, target):
++            raise RuntimeError("scope down")
++
++    client = _FakeClient(
++        {
++            "alice": _BoomPeer(),
++            "hermes": _FakePeer({"alice": _FakeScope([_conclusion("h-1", "still visible")])}),
++        }
++    )
++    _set_client(monkeypatch, client)
++
++    assert [c["body"] for c in provider.journey_cards()] == ["still visible"]
++
++
++def test_respects_limit(provider, monkeypatch):
++    many = [_conclusion(f"c-{i}", f"fact {i}") for i in range(50)]
++    client = _FakeClient({"alice": _FakePeer({"alice": _FakeScope(many)})})
++    _set_client(monkeypatch, client)
++
++    assert len(provider.journey_cards(limit=7)) == 7
++
++
++def test_unconfigured_or_broken_returns_empty(monkeypatch):
++    provider = HonchoMemoryProvider()
++
++    # Not enabled → [].
++    _set_config(monkeypatch, enabled=False)
++    assert provider.journey_cards() == []
++
++    # No peer name → [].
++    _set_config(monkeypatch, peer_name=None)
++    assert provider.journey_cards() == []
++
++    # Client construction blowing up (no key, SDK missing) → [], never raises.
++    _set_config(monkeypatch)
++    monkeypatch.setattr(
++        client_mod, "get_honcho_client",
++        lambda cfg: (_ for _ in ()).throw(ValueError("no api key")),
++    )
++    assert provider.journey_cards() == []
++
++
++def test_pagination_reaches_beyond_first_page(provider, monkeypatch):
++    """A bulk history import can leave many hundreds of conclusions; reading
++    only .items of the first page would silently hide the older ones from the
++    journey timeline. Iterating the page object must walk all of them."""
++    many = [_conclusion(f"c-{i}", f"fact {i}") for i in range(350)]
++    client = _FakeClient({"alice": _FakePeer({"alice": _FakeScope(many)})})
++    _set_client(monkeypatch, client)
++
++    cards = provider.journey_cards()
++
++    assert len(cards) == 350
++    assert cards[-1]["body"] == "fact 349"
++
++
++def test_cards_carry_session_provenance(provider, monkeypatch):
++    """Conclusions record the session they were derived from; the card must
++    pass it through so journey surfaces can resolve the originating
++    conversation. A missing session id stays None (never fabricated)."""
++    client = _FakeClient(
++        {
++            "alice": _FakePeer({"alice": _FakeScope([
++                _conclusion("c-1", "sourced fact", session_id="20260101_000000_abc123"),
++                _conclusion("c-2", "orphan fact"),
++            ])}),
++        }
++    )
++    _set_client(monkeypatch, client)
++
++    by_body = {c["body"]: c for c in provider.journey_cards()}
++    assert by_body["sourced fact"]["session_id"] == "20260101_000000_abc123"
++    assert by_body["orphan fact"]["session_id"] is None
++
++
++# ── journey_session_messages() — the source corpus behind a conclusion ──────
++
++
++class _FakeMessagePage:
++    def __init__(self, items):
++        self._items = items
++
++    def __iter__(self):
++        return iter(self._items)
++
++
++class _FakeSession:
++    def __init__(self, sid, items):
++        self.id = sid
++        self._items = items
++
++    def messages(self, size=100):
++        return _FakeMessagePage(self._items)
++
++
++class _FakeSessionClient(_FakeClient):
++    """Client whose session(id) is get-or-create — reaching it for an unknown
++    id would CREATE a session (the trap the existence probe must avoid)."""
++
++    def __init__(self, sessions):
++        super().__init__({})
++        self._sessions = sessions
++        self.created = []
++
++    def sessions(self, filters=None, size=50):
++        if filters and "id" in filters:
++            wanted = str(filters["id"])
++            return iter([s for s in self._sessions.values() if s.id == wanted])
++        return iter(self._sessions.values())
++
++    def session(self, sid):
++        if sid not in self._sessions:
++            self.created.append(sid)  # the bug: get-or-create side effect
++            self._sessions[sid] = _FakeSession(sid, [])
++        return self._sessions[sid]
++
++
++def _message(content, peer="alice", created_at=None):
++    return SimpleNamespace(
++        content=content,
++        peer_id=peer,
++        created_at=created_at or datetime(2026, 5, 1, 9, 30, tzinfo=timezone.utc),
++    )
++
++
++def test_session_messages_returns_corpus(provider, monkeypatch):
++    sess = _FakeSession("sess-1", [
++        _message("hello", peer="alice"),
++        _message("hi back", peer="hermes"),
++        _message("   "),  # blank content is dropped
++    ])
++    _set_client(monkeypatch, _FakeSessionClient({"sess-1": sess}))
++
++    msgs = provider.journey_session_messages("sess-1")
++
++    assert [(m["peer"], m["content"]) for m in msgs] == [("alice", "hello"), ("hermes", "hi back")]
++    assert all(isinstance(m["timestamp"], datetime) for m in msgs)
++
++
++def test_session_messages_carry_roles(provider, monkeypatch):
++    """The configured user peer speaks as 'user'; every other peer (hermes,
++    chatgpt, any future import source) speaks as 'assistant'. Session
++    materialization relies on this instead of guessing from peer names."""
++    sess = _FakeSession("sess-1", [
++        _message("question", peer="alice"),
++        _message("answer", peer="chatgpt"),
++        _message("follow-up", peer="alice"),
++        _message("more", peer="hermes"),
++    ])
++    _set_client(monkeypatch, _FakeSessionClient({"sess-1": sess}))
++
++    roles = [m["role"] for m in provider.journey_session_messages("sess-1")]
++
++    assert roles == ["user", "assistant", "user", "assistant"]
++
++
++def test_session_messages_unknown_id_never_creates(provider, monkeypatch):
++    """client.session() is get-or-create server-side; a read-only journey
++    lookup for an unknown id must probe first and return [] without ever
++    touching the creating accessor."""
++    client = _FakeSessionClient({"sess-1": _FakeSession("sess-1", [_message("x")])})
++    _set_client(monkeypatch, client)
++
++    assert provider.journey_session_messages("no-such-session") == []
++    assert client.created == []
++
++
++def test_session_messages_best_effort(provider, monkeypatch):
++    # Empty/blank id → [].
++    assert provider.journey_session_messages("") == []
++
++    # Backend down → [], never raises.
++    monkeypatch.setattr(
++        client_mod, "get_honcho_client",
++        lambda cfg: (_ for _ in ()).throw(ConnectionError("backend down")),
++    )
++    assert provider.journey_session_messages("sess-1") == []
++
++
++def test_session_messages_respects_limit(provider, monkeypatch):
++    sess = _FakeSession("sess-1", [_message(f"m{i}") for i in range(40)])
++    _set_client(monkeypatch, _FakeSessionClient({"sess-1": sess}))
++
++    assert len(provider.journey_session_messages("sess-1", limit=5)) == 5
+-- 
+2.50.1 (Apple Git-155)
+

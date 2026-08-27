@@ -1,0 +1,22 @@
+journey-starmap standalone mirror - provenance
+==============================================
+
+Upstream PR:    https://github.com/NousResearch/hermes-agent/pull/70309
+                "feat(journey): provider memory nodes, provenance drill-down,
+                 search/filter, and /recall"
+Author:         Tobias Musser (GitHub: P2ppyJack)
+Base commit:    987064caa4f8845f605ac7346fed5b72fddfb21c  (hermes-agent main)
+Head commit:    b2de4de4aa7901f6f4dc9c0b91f1e6fd3c375cd2  (PR head, refreshed 2026-08)
+Commits 0001-0005: dd88e3f779, a38440765a, fb37128ddb, f84fc8a7d8, b2de4de4aa
+
+Canonical dev home: branch feat/journey-provider-memory-nodes on
+    https://github.com/P2ppyJack/hermes-agent  (force-pushed; PR #70309 tracks it)
+Screenshots:    captured against a fully synthetic sandbox; also hosted on fork
+    orphan branch pr70309-assets (11 of 13; captures 12-13 pending)
+
+Generated:      2026-08-26 by Hermes agent on Toby's Mac
+Regenerate:     cd ~/.hermes/hermes-agent
+    git format-patch 987064caa4f8845f605ac7346fed5b72fddfb21c..b2de4de4aa7901f6f4dc9c0b91f1e6fd3c375cd2
+    git diff       987064caa4f8845f605ac7346fed5b72fddfb21c..b2de4de4aa7901f6f4dc9c0b91f1e6fd3c375cd2 > patches/full.patch
+
+License: MIT (c) 2026 Tobias Musser; applies to hermes-agent (MIT (c) 2025 Nous Research).
