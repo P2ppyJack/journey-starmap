@@ -11,6 +11,24 @@
 
 ---
 
+## Install
+
+```bash
+# 1) hermes-agent checkout (skip if you already have one)
+git clone https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent
+
+# 2) this patch set, then apply
+git clone https://github.com/P2ppyJack/journey-starmap.git
+bash journey-starmap/patches/apply.sh
+```
+
+That applies the full 5-commit feature (base `987064caa` → head `b2de4de4a`).
+See [Applying this patch](#applying-this-patch) for conflict handling and the
+individual patches.
+
+---
+
 *Feature documentation below is the PR #70309 description, verbatim.*
 
 ---
@@ -169,8 +187,9 @@ Happy to open a separate PR/discussion if that's a direction you'd want to take.
 
 ```bash
 git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/P2ppyJack/journey-starmap.git
 cd hermes-agent
-bash <path-to-this-repo>/patches/apply.sh     # 3-way apply of full.patch
+bash ../journey-starmap/patches/apply.sh     # 3-way apply of full.patch
 ```
 
 The patch set was generated against hermes-agent `main` @ `987064caa4f8845f605ac7346fed5b72fddfb21c`. If your checkout
