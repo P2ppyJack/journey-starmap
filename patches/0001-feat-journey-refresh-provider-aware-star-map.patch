@@ -1,3 +1,72 @@
+From 6c3780a4befcedebac5ba92ba9f5c0a8c2cb3d4c Mon Sep 17 00:00:00 2001
+From: Tobias Musser <19334922+P2ppyJack@users.noreply.github.com>
+Date: Mon, 14 Sep 2026 10:57:37 -0400
+Subject: [PATCH] feat(journey): refresh provider-aware star map
+
+- Add provider memory nodes with session provenance and source-corpus endpoints.
+- Add a provider-aware star map with a typed source contract, drill-down, and search sidebar.
+- Upgrade share codes to v4 while preserving legacy v3 decoding.
+- Add conclusion-aware nodes, star-map filters, and /recall context drafts.
+- Add cross-profile memory consolidation and reconcile the client with api/* modules.
+
+Rebased onto origin/main 62e5f466565ee56351e4483ead8e62f9e782f8b3; endpoints ported to web_routers/status.py after the upstream web_server refactor.
+---
+ agent/learning_graph.py                       | 120 ++++-
+ agent/learning_graph_render.py                |  20 +
+ agent/learning_mutations.py                   | 373 +++++++++++++-
+ agent/memory_provider.py                      |  75 +++
+ apps/desktop/src/api/skills.ts                |  29 +-
+ .../src/app/chat/composer/focus.test.ts       |  38 ++
+ .../hooks/use-slash-completions.test.tsx      |  38 ++
+ .../composer/hooks/use-slash-completions.ts   |  26 +-
+ .../session/hooks/use-prompt-actions/slash.ts |  11 +
+ apps/desktop/src/app/starmap/color.ts         |  12 +
+ apps/desktop/src/app/starmap/index.tsx        | 160 +++++-
+ .../app/starmap/node-context-menu.test.tsx    |  12 +-
+ .../src/app/starmap/node-context-menu.tsx     | 171 ++++++-
+ .../src/app/starmap/node-sessions-dialog.tsx  | 306 +++++++++++
+ .../src/app/starmap/profile-selector.tsx      | 180 +++++++
+ apps/desktop/src/app/starmap/recall.test.ts   |  46 ++
+ apps/desktop/src/app/starmap/recall.ts        |  34 ++
+ apps/desktop/src/app/starmap/render.ts        | 104 +++-
+ .../src/app/starmap/search-sidebar.tsx        | 478 ++++++++++++++++++
+ apps/desktop/src/app/starmap/search.test.ts   | 220 ++++++++
+ apps/desktop/src/app/starmap/search.ts        | 354 +++++++++++++
+ .../src/app/starmap/share-code.test.ts        |  30 +-
+ apps/desktop/src/app/starmap/share-code.ts    | 115 +++--
+ apps/desktop/src/app/starmap/sources.ts       |   6 +
+ apps/desktop/src/app/starmap/star-map.tsx     | 355 ++++++++++++-
+ apps/desktop/src/app/starmap/types.ts         |   1 +
+ apps/desktop/src/hermes.ts                    |  74 +++
+ apps/desktop/src/i18n/en.ts                   |  69 ++-
+ apps/desktop/src/i18n/types.ts                |  64 +++
+ apps/desktop/src/i18n/zh.ts                   |  66 ++-
+ .../src/lib/desktop-slash-commands.test.ts    |  34 ++
+ .../desktop/src/lib/desktop-slash-commands.ts |  39 ++
+ apps/desktop/src/lib/loadout.ts               |  10 +-
+ apps/desktop/src/store/starmap.ts             |  58 ++-
+ apps/desktop/src/types/hermes.ts              |  42 +-
+ hermes_cli/web_models.py                      |  11 +
+ hermes_cli/web_routers/status.py              | 321 +++++++++++-
+ plugins/memory/honcho/__init__.py             | 135 +++++
+ tests/agent/test_learning_graph.py            | 235 +++++++++
+ tests/agent/test_learning_mutations.py        |  83 +++
+ .../test_provider_session_materialize.py      | 166 ++++++
+ .../memory/test_honcho_journey_cards.py       | 295 +++++++++++
+ tests/test_learning_cross_insert.py           | 129 +++++
+ 43 files changed, 5050 insertions(+), 95 deletions(-)
+ create mode 100644 apps/desktop/src/app/starmap/node-sessions-dialog.tsx
+ create mode 100644 apps/desktop/src/app/starmap/profile-selector.tsx
+ create mode 100644 apps/desktop/src/app/starmap/recall.test.ts
+ create mode 100644 apps/desktop/src/app/starmap/recall.ts
+ create mode 100644 apps/desktop/src/app/starmap/search-sidebar.tsx
+ create mode 100644 apps/desktop/src/app/starmap/search.test.ts
+ create mode 100644 apps/desktop/src/app/starmap/search.ts
+ create mode 100644 apps/desktop/src/app/starmap/sources.ts
+ create mode 100644 tests/agent/test_provider_session_materialize.py
+ create mode 100644 tests/plugins/memory/test_honcho_journey_cards.py
+ create mode 100644 tests/test_learning_cross_insert.py
+
 diff --git a/agent/learning_graph.py b/agent/learning_graph.py
 index c653107301e3be258a8e3357ae6b4c51f3bb1396..5f3def59ee210e3a62d173a42ada5463ba7cefa5 100644
 --- a/agent/learning_graph.py
@@ -6106,3 +6175,6 @@ index 0000000000000000000000000000000000000000..3e30c4c6996eb4ae27c5c3cdc6626a0b
 +    assert resp.status_code == 200
 +    assert resp.json()["ok"] is False
 +    assert "not supported" in resp.json()["message"]
+-- 
+2.50.1 (Apple Git-155)
+
