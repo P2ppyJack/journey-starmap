@@ -34,7 +34,7 @@ jobs:
       - name: Verify resulting tree
         run: |
           test "$(git -C .source rev-parse HEAD)" = "7b761da2de4979e424510ca7022bf9527aa65b68"
-          test "$(git -C .source write-tree)" = "8f656cbd8abd015f27268bab5c3f61eb0f742e41"
+          test "$(git -C .source write-tree)" = "4ba1584dc86292dca24d16b9d6f4ce420467c3bd"
           git -C .source diff --cached --check
       - name: Run package tests
         run: python -m unittest discover -s tests -v

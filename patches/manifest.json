@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "package_version": "0.3.0",
+  "package_version": "0.4.0",
   "upstream_repository": "https://github.com/NousResearch/hermes-agent",
   "upstream_base": "7b761da2de4979e424510ca7022bf9527aa65b68",
   "upstream_base_tree": "ba6692fee819a7735ada50d9fd8832acb1ea7534",
-  "feature_commit": "807a67b78f8aaa575e8ef5bfa241f1ee5b90e886",
-  "result_tree": "8f656cbd8abd015f27268bab5c3f61eb0f742e41",
+  "feature_commit": "f5fe9afd00a195327e1c0a4335bbbe0bc9b412b6",
+  "result_tree": "4ba1584dc86292dca24d16b9d6f4ce420467c3bd",
   "patch": {
-    "path": "0001-feat-journey-provider-memory-nodes-star-map-provenan.patch",
-    "sha256": "7bd110a0cdad653dd46cfd97674ac840ea9932229a2b8c25932c6d658a2a8b50"
+    "path": "0001-feat-journey-star-map-provider-memory-nodes-multi-profile.patch",
+    "sha256": "103b0393e596a7819dc754ad20abdd7f736b67b8fc0c7d8c9236bbae2baaad7b"
   }
 }

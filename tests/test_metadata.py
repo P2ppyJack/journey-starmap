@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = json.loads((ROOT / "patches/manifest.json").read_text(encoding="utf-8"))
-PATCH_NAME = "0001-feat-journey-provider-memory-nodes-star-map-provenan.patch"
+PATCH_NAME = "0001-feat-journey-star-map-provider-memory-nodes-multi-profile.patch"
 SCREENSHOTS = {
     "01-slash-journey-composer.png": "e049a515fca55d2962be09604b49db604f8f0d65e5ff84173adff07a8411e855",
     "02-star-map-overview.png": "29f927745fdbff31f217df5692fd9a503f8dcf55abf7ef0608c1fdf540634e0f",
@@ -29,16 +29,16 @@ SCREENSHOTS = {
 
 class MetadataTests(unittest.TestCase):
     def test_manifest_and_version(self):
-        self.assertEqual((ROOT / "VERSION").read_text().strip(), "0.3.0")
+        self.assertEqual((ROOT / "VERSION").read_text().strip(), "0.4.0")
         self.assertEqual(MANIFEST["schema_version"], 1)
-        self.assertEqual(MANIFEST["package_version"], "0.3.0")
+        self.assertEqual(MANIFEST["package_version"], "0.4.0")
         self.assertEqual(
             MANIFEST["upstream_base"],
             "7b761da2de4979e424510ca7022bf9527aa65b68",
         )
         self.assertEqual(
             MANIFEST["result_tree"],
-            "8f656cbd8abd015f27268bab5c3f61eb0f742e41",
+            "4ba1584dc86292dca24d16b9d6f4ce420467c3bd",
         )
 
     def test_exactly_one_patch_is_declared(self):
@@ -60,7 +60,7 @@ class MetadataTests(unittest.TestCase):
             text=True,
         )
         paths = [line.split("\t", 2)[-1] for line in result.stdout.splitlines()]
-        self.assertEqual(len(paths), 39)
+        self.assertEqual(len(paths), 44)
         self.assertEqual(len(paths), len(set(paths)))
         excluded = (
             "gateway/",
@@ -79,10 +79,10 @@ class MetadataTests(unittest.TestCase):
         for name, expected in SCREENSHOTS.items():
             self.assertEqual(hashlib.sha256((directory / name).read_bytes()).hexdigest(), expected)
 
-    def test_readme_marks_excluded_screenshots(self):
+    def test_readme_describes_screenshots(self):
         text = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("Screenshots 12 and 13", text)
-        self.assertIn("excluded features", text)
+        self.assertNotIn("excluded features", text)
         credit = (
             "Prepared by "
             + "Hermes ("

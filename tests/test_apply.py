@@ -64,7 +64,7 @@ class ApplyTests(unittest.TestCase):
         self.patch.write_bytes(patch)
         self.manifest = {
             "schema_version": 1,
-            "package_version": "0.3.0",
+            "package_version": "0.4.0",
             "upstream_base": self.base,
             "upstream_base_tree": base_tree,
             "feature_commit": self.feature,

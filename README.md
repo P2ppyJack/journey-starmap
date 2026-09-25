@@ -1,14 +1,14 @@
 # Journey star map
 
-Version **0.3.0** packages the Journey feature from [Hermes Agent PR #70309](https://github.com/NousResearch/hermes-agent/pull/70309) as one source patch. It is not a standalone application or an upstream Hermes release.
+Version **0.4.0** packages the Journey feature from [Hermes Agent PR #70309](https://github.com/NousResearch/hermes-agent/pull/70309) as one source patch. It is not a standalone application or an upstream Hermes release.
 
 | Item | Pinned value |
 |---|---|
 | Upstream repository | `NousResearch/hermes-agent` |
 | Upstream base | `7b761da2de4979e424510ca7022bf9527aa65b68` |
-| Feature commit | `807a67b78f8aaa575e8ef5bfa241f1ee5b90e886` |
-| Resulting tree | `8f656cbd8abd015f27268bab5c3f61eb0f742e41` |
-| Patch | [`patches/0001-feat-journey-provider-memory-nodes-star-map-provenan.patch`](patches/0001-feat-journey-provider-memory-nodes-star-map-provenan.patch) |
+| Feature commit | `f5fe9afd00a195327e1c0a4335bbbe0bc9b412b6` |
+| Resulting tree | `4ba1584dc86292dca24d16b9d6f4ce420467c3bd` |
+| Patch | [`patches/0001-feat-journey-star-map-provider-memory-nodes-multi-profile.patch`](patches/0001-feat-journey-star-map-provider-memory-nodes-multi-profile.patch) |
 
 ## What the feature adds
 
@@ -18,8 +18,9 @@ Version **0.3.0** packages the Journey feature from [Hermes Agent PR #70309](htt
 - **Recall into a composer:** `/recall` opens the map in recall mode. A selected node can be inserted into the visible chat or saved as a reviewed draft for another session; it is never sent automatically.
 - **Read-only provider boundary:** edit and delete remain available for local memory files, while provider-backed nodes identify their provider and refuse mutation.
 - **Share codes:** version 4 preserves provider source names, and existing version 3 codes remain readable.
+- **Multi-profile mode:** a profile selector merges the chosen profiles' graphs into one map and badges each node with its profile. A memory node can be copied into another selected profile's `MEMORY.md`; the copy goes through the memory tool's locked, threat-scanned, size-capped add, and a refusal leaves that file unchanged. Skills are not copied.
 
-The patch contains only the Journey backend and desktop feature. It does **not** include multi-profile selection or cross-profile insertion, a web star-map page, native-turn gateway changes, session-coordination changes, or desktop-backend attachment changes.
+The patch contains only the Journey backend and desktop feature. It does **not** include a web dashboard star-map page, a TUI star-map link, native-turn gateway changes, session-coordination changes, or desktop-backend attachment changes.
 
 ## Where this came from
 
@@ -29,7 +30,7 @@ The feature extends the existing `MemoryProvider`, learning graph, status router
 2. `journey_session_messages()` provides source messages for provenance inspection.
 3. `agent.learning_graph` appends provider cards after local memory cards so existing local positions remain stable.
 4. `agent.learning_mutations` builds recall drafts and imports provider sessions while keeping provider storage read-only.
-5. The status router exposes profile-scoped graph, provenance, recall, and materialization endpoints.
+5. The status router exposes profile-scoped graph, provenance, recall, and materialization endpoints, a merged multi-profile graph, and a cross-profile memory insert.
 6. The desktop star map renders, searches, filters, shares, and recalls those nodes.
 
 ## Requirements
@@ -57,7 +58,7 @@ Confirm the staged source tree:
 ```bash
 git -C hermes-agent-journey diff --cached --check
 git -C hermes-agent-journey write-tree
-# 8f656cbd8abd015f27268bab5c3f61eb0f742e41
+# 4ba1584dc86292dca24d16b9d6f4ce420467c3bd
 ```
 
 Install dependencies and build the desktop from the patched checkout:
@@ -84,6 +85,7 @@ Review the upstream build and installation documentation before replacing an ins
 4. Run `/recall`, select a node, and insert its reference text into the visible composer for review.
 5. Use the node menu to add the same reviewed draft to another existing session.
 6. Export and import map share codes as needed; version 3 and version 4 codes are supported.
+7. With more than one profile, use the profile selector to show several profiles on one map. A memory node's menu offers **Insert into <profile>** for each other selected profile, or **Insert into all selected**.
 
 ## Rollback and uninstall
 
@@ -98,11 +100,12 @@ If a desktop build made from the patch was installed, stop the affected applicat
 - Provider-backed nodes are read-only through Journey.
 - Recall text is framed as untrusted reference data, but that framing is not a complete prompt-injection defense. Review drafts before sending.
 - The package has no configuration or data-schema migration.
-- Multi-profile and cross-profile features are not included. Screenshots 12 and 13 illustrate those excluded features and are retained only as existing repository assets.
+- A merged map shows at most 16 profiles; profiles that do not exist or fail to load are skipped.
+- A cross-profile copy is refused when the target `MEMORY.md` is disabled, full, or the text fails the memory tool's threat scan.
 
 ## Screenshots
 
-The included-feature views are illustrated by screenshots 01 through 11 under [`docs/screenshots/`](docs/screenshots/), including the map overview, search, provenance, source corpus, and recall flow.
+Screenshots 01 through 11 under [`docs/screenshots/`](docs/screenshots/) show the map overview, search, provenance, source corpus, and recall flow. Screenshots 12 and 13 show the profile selector and cross-profile insert; they only render with two or more profiles selected, so they are framed on the controls and show no memory content.
 
 ## Verification
 
