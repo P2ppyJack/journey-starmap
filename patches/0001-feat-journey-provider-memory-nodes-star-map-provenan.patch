@@ -1,22 +1,86 @@
+From 807a67b78f8aaa575e8ef5bfa241f1ee5b90e886 Mon Sep 17 00:00:00 2001
+From: Tobias Musser <19334922+P2ppyJack@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 00:12:58 -0400
+Subject: [PATCH] feat(journey): provider memory nodes, star-map provenance,
+ search and recall
+
+Add optional best-effort memory-provider hooks and Honcho support.
+
+Expose provider cards and source sessions while keeping provider nodes read-only.
+
+Add provenance drill-down, provider-session materialization, search and filters, /recall composer drafts, and share-code v4 with v3 decoding.
+
+Add backend and desktop behavior coverage.
+---
+ agent/learning_graph.py                       | 157 +++++-
+ agent/learning_graph_render.py                |  27 +-
+ agent/learning_mutations.py                   | 382 +++++++++++++-
+ agent/memory_provider.py                      |  75 +++
+ apps/desktop/src/api/skills.ts                |  83 ++-
+ .../src/app/chat/composer/focus.test.ts       |  36 ++
+ .../hooks/use-slash-completions.test.tsx      |  41 +-
+ .../composer/hooks/use-slash-completions.ts   |  24 +-
+ .../session/hooks/use-prompt-actions/slash.ts |  11 +
+ apps/desktop/src/app/starmap/color.ts         |  12 +
+ apps/desktop/src/app/starmap/index.tsx        | 123 ++++-
+ .../app/starmap/node-context-menu.test.tsx    |  21 +-
+ .../src/app/starmap/node-context-menu.tsx     | 128 ++++-
+ .../src/app/starmap/node-sessions-dialog.tsx  | 306 +++++++++++
+ apps/desktop/src/app/starmap/render.ts        | 104 +++-
+ .../src/app/starmap/search-sidebar.tsx        | 478 ++++++++++++++++++
+ apps/desktop/src/app/starmap/search.test.ts   | 220 ++++++++
+ apps/desktop/src/app/starmap/search.ts        | 358 +++++++++++++
+ .../src/app/starmap/share-code.test.ts        |  30 +-
+ apps/desktop/src/app/starmap/share-code.ts    | 116 +++--
+ apps/desktop/src/app/starmap/sources.ts       |   6 +
+ apps/desktop/src/app/starmap/star-map.tsx     | 321 +++++++++++-
+ apps/desktop/src/app/starmap/types.ts         |   1 +
+ apps/desktop/src/i18n/en.ts                   |  57 ++-
+ apps/desktop/src/i18n/types.ts                |  52 ++
+ apps/desktop/src/i18n/zh.ts                   |  54 +-
+ .../src/lib/desktop-slash-commands.test.ts    |  89 ++++
+ .../desktop/src/lib/desktop-slash-commands.ts |  48 ++
+ apps/desktop/src/lib/loadout.ts               |  10 +-
+ apps/desktop/src/store/starmap.ts             |  18 +
+ apps/desktop/src/types/hermes.ts              |  28 +-
+ hermes_cli/web_models.py                      |   6 +
+ hermes_cli/web_routers/status.py              | 104 +++-
+ plugins/memory/honcho/__init__.py             | 135 +++++
+ tests/agent/test_learning_graph.py            | 235 +++++++++
+ tests/agent/test_learning_mutations.py        | 121 +++++
+ .../test_provider_session_materialize.py      | 170 +++++++
+ .../test_learning_provider_session.py         |  75 +++
+ .../memory/test_honcho_journey_cards.py       | 295 +++++++++++
+ 39 files changed, 4441 insertions(+), 116 deletions(-)
+ create mode 100644 apps/desktop/src/app/starmap/node-sessions-dialog.tsx
+ create mode 100644 apps/desktop/src/app/starmap/search-sidebar.tsx
+ create mode 100644 apps/desktop/src/app/starmap/search.test.ts
+ create mode 100644 apps/desktop/src/app/starmap/search.ts
+ create mode 100644 apps/desktop/src/app/starmap/sources.ts
+ create mode 100644 tests/agent/test_provider_session_materialize.py
+ create mode 100644 tests/hermes_cli/test_learning_provider_session.py
+ create mode 100644 tests/plugins/memory/test_honcho_journey_cards.py
+
 diff --git a/agent/learning_graph.py b/agent/learning_graph.py
-index c653107301e3be258a8e3357ae6b4c51f3bb1396..5f3def59ee210e3a62d173a42ada5463ba7cefa5 100644
+index ca6c9e645f8305e11e445711ade85434d1e7916b..5083fdb07618afcdfcf0d191c2ecbbcc8f6fbba8 100644
 --- a/agent/learning_graph.py
 +++ b/agent/learning_graph.py
-@@ -67,6 +67,10 @@ def _to_int_ts(value: Any) -> Optional[int]:
-     try:
-         if value is None or not (s := str(value).strip()):
-             return None
+@@ -70,0 +71,4 @@ def _to_int_ts(value: Any) -> Optional[int]:
 +        if isinstance(value, datetime):
 +            if value.tzinfo is None:
 +                value = value.replace(tzinfo=timezone.utc)
 +            return int(value.timestamp())
-         if isinstance(value, (int, float)):
-             return int(value)
-         try:
-@@ -126,6 +130,27 @@ def density_stats(nodes: dict[str, SkillNode], edges: list[tuple[str, str]]) ->
-     }
- 
- 
+@@ -144,2 +148,27 @@ def memory_node_id(card: dict[str, Any], index: int) -> str:
+-    """``memory:<source>:<index>:<fingerprint>`` — position for the occurrence, text for identity."""
+-    return f"memory:{card['source']}:{index}:{card['fingerprint']}"
++    """``memory:<source>:<index>:<fingerprint>`` — position for the occurrence, text for identity.
++
++    Cards without a fingerprint (external memory-provider cards, which are read-only in the
++    journey) keep the positional ``memory:<source>:<index>`` shape."""
++    fingerprint = card.get("fingerprint")
++    return f"memory:{card['source']}:{index}:{fingerprint}" if fingerprint else f"memory:{card['source']}:{index}"
++
++
 +# Bulk importers name provider sessions ``<source>-import-…`` (the ChatGPT
 +# importer already does). New import sources inherit origin detection by
 +# following the convention — no code change required here.
@@ -36,15 +100,7 @@ index c653107301e3be258a8e3357ae6b4c51f3bb1396..5f3def59ee210e3a62d173a42ada5463
 +        return explicit
 +    m = _IMPORT_SESSION_RE.match(session_id or "")
 +    return m.group(1).lower() if m else "hermes"
-+
-+
- def _memory_cards() -> list[dict[str, Any]]:
-     """``MEMORY.md`` / ``USER.md`` prose split on bare ``§`` separators; every
-     non-empty chunk becomes one card (MEMORY.md cards first, then USER.md)."""
-@@ -147,6 +172,75 @@ def _memory_cards() -> list[dict[str, Any]]:
-     return cards
- 
- 
+@@ -174,0 +204,71 @@ def _memory_cards() -> list[dict[str, Any]]:
 +def _active_provider_name() -> Optional[str]:
 +    """Name of the active external memory provider ('honcho', …), or None.
 +
@@ -72,8 +128,10 @@ index c653107301e3be258a8e3357ae6b4c51f3bb1396..5f3def59ee210e3a62d173a42ada5463
 +    journey must render regardless of external-backend health.
 +
 +    Cards are appended AFTER the file-based cards in the combined list, so
-+    ``memory:<source>:<index>`` ids for ``MEMORY.md``/``USER.md`` chunks are
-+    unchanged by a provider's presence (mutation index math stays valid).
++    ``memory:<source>:<index>[:<fingerprint>]`` ids for ``MEMORY.md``/``USER.md``
++    chunks are unchanged by a provider's presence (legacy positional ids stay valid).
++    Provider cards carry no fingerprint (read-only in the journey), so their ids
++    stay ``memory:<provider>:<index>``.
 +    """
 +    try:
 +        from plugins.memory import _get_active_memory_provider, load_memory_provider
@@ -114,27 +172,46 @@ index c653107301e3be258a8e3357ae6b4c51f3bb1396..5f3def59ee210e3a62d173a42ada5463
 +    return cards
 +
 +
- def _tokenize(text: str) -> set[str]:
-     return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3}
- 
-@@ -174,7 +268,8 @@ def build_learning_graph() -> dict[str, Any]:
-         name: node for name, node in build_skill_nodes(roots).items()
-         if node.source != "base" and (node.created_by == "agent" or node.use_count > 0)
-     }
+@@ -202,0 +303,5 @@ def _has_learning_signal(node: SkillNode) -> bool:
++def _skill_roots() -> list[tuple[str, Path]]:
++    repo = Path(__file__).resolve().parent.parent
++    return [("base", repo / "skills"), ("profile", get_hermes_home() / "skills")]
++
++
+@@ -204,3 +309,10 @@ def build_learning_graph() -> dict[str, Any]:
+-    """Full payload for the desktop learning panel: non-base skills with real
+-    learning signal (agent-created or used) plus memory chunks as graph nodes."""
+-    roots = [("base", Path(__file__).resolve().parent.parent / "skills"), ("profile", get_hermes_home() / "skills")]
++    """Full payload for the desktop learning panel.
++
++    Focus on what is profile-learned and actionable:
++    - skills that are NOT base-installed and show real learning signal
++      (agent-created, user-taught, or used),
++    - memory chunks as first-class graph nodes connected to those learned skills:
++      built-in ``MEMORY.md``/``USER.md`` cards first, then durable entries from
++      the active external memory provider (``journey_cards()``), when any.
++    """
++    all_skills = build_skill_nodes(_skill_roots())
+@@ -208 +320 @@ def build_learning_graph() -> dict[str, Any]:
+-        name: node for name, node in build_skill_nodes(roots).items()
++        name: node for name, node in all_skills.items()
+@@ -211 +323,2 @@ def build_learning_graph() -> dict[str, Any]:
 -    skill_edges, memory_cards = build_edges(learned_skills), _memory_cards()
 +    skill_edges = build_edges(learned_skills)
 +    memory_cards = _memory_cards() + _provider_memory_cards()
-     memory_edges = _memory_skill_edges(memory_cards, list(learned_skills.values()))
-     clusters = Counter(node.category for node in learned_skills.values())
-     if memory_cards:
-@@ -194,11 +289,34 @@ def build_learning_graph() -> dict[str, Any]:
-         }
-         for i, card in enumerate(memory_cards)
-     ]
+@@ -223,7 +335,0 @@ def build_learning_graph() -> dict[str, Any]:
+-    ] + [
+-        {
+-            "id": memory_node_id(card, i), "label": card["title"], "kind": "memory",
+-            "memorySource": card["source"], "timestamp": card.get("timestamp"), "category": "memory",
+-            "useCount": 0, "state": "active", "createdBy": "memory", "pinned": False,
+-        }
+-        for i, card in enumerate(memory_cards)
+@@ -230,0 +337,19 @@ def build_learning_graph() -> dict[str, Any]:
 +    for i, card in enumerate(memory_cards):
 +        graph_nodes.append(
 +            {
-+                "id": f"memory:{card['source']}:{i}",
++                "id": memory_node_id(card, i),
 +                "label": card["title"],
 +                "kind": "memory",
 +                "memorySource": card["source"],
@@ -150,87 +227,71 @@ index c653107301e3be258a8e3357ae6b4c51f3bb1396..5f3def59ee210e3a62d173a42ada5463
 +            }
 +        )
 +
-     return {
-         "nodes": graph_nodes,
-         "edges": [{"source": a, "target": b} for a, b in skill_edges + memory_edges],
-         "clusters": [{"category": c, "count": n} for c, n in sorted(clusters.items(), key=lambda kv: -kv[1])],
-         "memory": memory_cards,
+@@ -235,0 +361,4 @@ def build_learning_graph() -> dict[str, Any]:
 +        # Active external memory provider ('honcho', …) or None. The desktop
 +        # gates provider-specific journey UI (conclusion nodes) on this rather
 +        # than inferring the provider from node presence.
 +        "memoryProvider": _active_provider_name(),
-         "stats": {
-             **density_stats(learned_skills, skill_edges),
-             "memory_nodes": len(memory_cards), "memory_skill_edges": len(memory_edges), "learned_skills": len(learned_skills),
 diff --git a/agent/learning_graph_render.py b/agent/learning_graph_render.py
-index 7bbed7d23702f251f13db7439628a4b49200cf76..2e9d96700cb57f760e293f765c4f6f291cebe9ec 100644
+index 8b8f1d69a5c149ce7c881c5588e15c64710abc28..aba5acd0b9ba5a65dd0e1d2e73425d3538c29d0a 100644
 --- a/agent/learning_graph_render.py
 +++ b/agent/learning_graph_render.py
-@@ -185,6 +185,26 @@ def _skill_category_counts(nodes: Iterable[dict[str, Any]]) -> Counter:
-     return Counter(str(n.get("category") or "skill") for n in nodes if not _is_memory(n))
- 
- 
+@@ -172,0 +173,18 @@ def _node_score(node: dict[str, Any], rec: float) -> float:
 +def _node_meta(node: dict[str, Any]) -> str:
-+    if node.get("kind") == "memory":
++    if _is_memory(node):
 +        mem_source = str(node.get("memorySource") or "memory")
 +        if mem_source == "profile":
 +            source = "profile memory"
 +        elif mem_source == "memory":
 +            source = "memory"
 +        else:
-+            # External memory provider (e.g. "honcho memory").
 +            source = f"{mem_source} memory"
-+        return f"{source} · {format_date(_to_ts(node.get('timestamp')))}"
-+    bits = [str(node.get("category") or "skill"), format_date(_to_ts(node.get("timestamp")))]
++        return f"{source} · {format_date(_node_ts(node))}"
 +    count = int(node.get("useCount", 0) or 0)
-+    if count:
-+        bits.append(f"x{count}")
-+    if node.get("pinned"):
-+        bits.append("pinned")
-+    return " · ".join(bits)
++    return " · ".join(
++        [str(node.get("category") or "skill"), format_date(_node_ts(node))]
++        + ([f"x{count}"] if count else [])
++        + (["pinned"] if node.get("pinned") else [])
++    )
 +
 +
- # ── Timeline chart frame ─────────────────────────────────────────────────────
- 
- class _ChartBucket:
+@@ -175,6 +193 @@ def _node_card(node: dict[str, Any]) -> dict[str, Any]:
+-    mem, text, date = _is_memory(node), _node_raw_label(node), format_date(_node_ts(node))
+-    if mem:
+-        meta = f"{'profile memory' if node.get('memorySource') == 'profile' else 'memory'} · {date}"
+-    else:
+-        count = int(node.get("useCount", 0) or 0)
+-        meta = " · ".join([str(node.get("category") or "skill"), date] + ([f"x{count}"] if count else []) + (["pinned"] if node.get("pinned") else []))
++    mem, text = _is_memory(node), _node_raw_label(node)
+@@ -183 +196 @@ def _node_card(node: dict[str, Any]) -> dict[str, Any]:
+-        "meta": meta, "style": STYLE_MEMORY if mem else STYLE_SKILL,
++        "meta": _node_meta(node), "style": STYLE_MEMORY if mem else STYLE_SKILL,
 diff --git a/agent/learning_mutations.py b/agent/learning_mutations.py
-index 2ee948af1b052f8bb23bc6847c647cc16f11e51b..f3e42704b40609d76b863e6b72af35ef06b1d113 100644
+index 415d22fa1768fa1ae4095fb9bc184283670c59a0..5620fd79fec87b51ca0792964b00f92e8739e35b 100644
 --- a/agent/learning_mutations.py
 +++ b/agent/learning_mutations.py
-@@ -10,6 +10,7 @@ deleting a memory rewrites its file.
- 
- from __future__ import annotations
- 
+@@ -15,0 +16 @@ from __future__ import annotations
 +import re
- from pathlib import Path
- from typing import Any, Callable
- 
-@@ -23,9 +24,16 @@ def parse_node_kind(node_id: str) -> str:
- def _parse_memory_id(node_id: str) -> tuple[str, int]:
-     """``memory:<source>:<index>`` → (source, global_index)."""
-     parts = node_id.split(":", 2)
-+    if len(parts) != 3 or parts[0] != "memory":
+@@ -30,0 +32,2 @@ def _parse_memory_id(node_id: str) -> tuple[str, int, str]:
++    # Provider-contributed memories (``memory:<provider>:<index>``) live outside the
++    # local §-files and are refused as read-only, naming the provider.
+@@ -31,0 +35,9 @@ def _parse_memory_id(node_id: str) -> tuple[str, int, str]:
++    if len(parts) not in (3, 4) or parts[0] != "memory":
 +        raise ValueError(f"bad memory node id: {node_id!r}")
 +    if parts[1] not in _MEMORY_FILES:
-+        # Provider-contributed nodes are read-only because their storage lives
-+        # outside the section-delimited memory files this module can rewrite.
++        # Provider-contributed memories live outside the local §-files and are
++        # deliberately read-only through journey mutations.
 +        raise ValueError(
 +            f"this memory belongs to the '{parts[1]}' memory provider and is "
 +            f"read-only in the journey — manage it with the provider's own tools"
 +        )
-     try:
--        if len(parts) != 3 or parts[0] != "memory" or parts[1] not in _MEMORY_FILES:
+@@ -33,2 +44,0 @@ def _parse_memory_id(node_id: str) -> tuple[str, int, str]:
+-        if len(parts) not in (3, 4) or parts[0] != "memory" or parts[1] not in _MEMORY_FILES:
 -            raise ValueError
-         return parts[1], int(parts[2])
-     except ValueError as exc:
-         raise ValueError(f"bad memory node id: {node_id!r}") from exc
-@@ -155,3 +163,364 @@ def _edit_memory(node_id: str, content: str) -> dict[str, Any]:
-     chunks[local] = body
-     _write_memory(path, chunks)
-     return {"ok": True, "message": f"updated memory in {path.name}"}
+@@ -207,0 +218,368 @@ def _edit_memory(node_id: str, content: str) -> dict[str, Any]:
 +
 +
-+# ── Materialize a provider session and recall journey context ──────────────
++# ── Materialize a provider session as a Hermes session ─────────────────────
 +
 +
 +def build_provider_session_import(
@@ -397,9 +458,15 @@ index 2ee948af1b052f8bb23bc6847c647cc16f11e51b..f3e42704b40609d76b863e6b72af35ef
 +    lives in the graph's ``memory`` cards (``node_detail`` deliberately RAISES
 +    for them since they have no rewritable §-file). Skills read their SKILL.md.
 +    """
-+    node = next((n for n in graph.get("nodes", []) if n.get("id") == node_id), None)
++    nodes = graph.get("nodes", [])
++    node = next((n for n in nodes if n.get("id") == node_id), None)
++    if node is None and parse_node_kind(node_id) == "memory" and node_id.count(":") == 2:
++        # A pre-fingerprint id (older graph, hand-typed /recall) names a file card by
++        # position alone — the same legacy contract the mutation path honours.
++        node = next((n for n in nodes if str(n.get("id", "")).startswith(node_id + ":")), None)
 +    if node is None:
 +        raise ValueError(f"node '{node_id}' is not in the current journey graph — refresh and retry")
++    node_id = str(node.get("id") or node_id)
 +
 +    kind = node.get("kind", "memory")
 +    meta = {
@@ -413,9 +480,9 @@ index 2ee948af1b052f8bb23bc6847c647cc16f11e51b..f3e42704b40609d76b863e6b72af35ef
 +    }
 +
 +    if kind == "memory":
-+        # ``memory:<source>:<index>`` — index is the position in the combined
-+        # card list, which IS ``graph['memory']`` (built in lockstep).
-+        parts = node_id.split(":", 2)
++        # ``memory:<source>:<index>[:<fingerprint>]`` — index is the position in the
++        # combined card list, which IS ``graph['memory']`` (built in lockstep).
++        parts = node_id.split(":")
 +        try:
 +            idx = int(parts[2])
 +        except (IndexError, ValueError) as exc:
@@ -426,7 +493,7 @@ index 2ee948af1b052f8bb23bc6847c647cc16f11e51b..f3e42704b40609d76b863e6b72af35ef
 +        meta["body"] = str(cards[idx].get("body", "")).strip()
 +        return meta
 +
-+    # Skill node: full SKILL.md via the shared detail resolver.
++    # Skill node: full SKILL.md via the upstream skill-detail resolver.
 +    detail = _skill_detail(node_id)
 +    if not detail.get("ok"):
 +        raise ValueError(detail.get("message", f"could not resolve skill '{node_id}'"))
@@ -482,6 +549,7 @@ index 2ee948af1b052f8bb23bc6847c647cc16f11e51b..f3e42704b40609d76b863e6b72af35ef
 +
 +        graph = build_learning_graph()
 +        meta = _recall_resolve(node_id, graph)
++        node_id = meta["id"]  # canonical graph id (a legacy positional id resolves to it)
 +        connected = _recall_connected(node_id, graph)
 +    except (ValueError, IndexError) as exc:
 +        return {"ok": False, "message": str(exc)}
@@ -590,13 +658,10 @@ index 2ee948af1b052f8bb23bc6847c647cc16f11e51b..f3e42704b40609d76b863e6b72af35ef
 +        "text": text,
 +    }
 diff --git a/agent/memory_provider.py b/agent/memory_provider.py
-index b5a9d2edc5e1d7caf625c8deaa2f616a6d1fab6b..dcf722585d9598bdb9990320fbd560300a604187 100644
+index 90078f5e5e524aaf94e825c9de98a6a4b8bc4962..6e4846154751a723c9e96b3ee354d52f1595310d 100644
 --- a/agent/memory_provider.py
 +++ b/agent/memory_provider.py
-@@ -190,3 +190,78 @@ class MemoryProvider(ABC):
-         """Absolute paths of provider state OUTSIDE HERMES_HOME for ``hermes backup``/``import``
-         (paths outside the home dir are skipped). MUST work without ``initialize()`` or network."""
-         return []
+@@ -206,0 +207,75 @@ class MemoryProvider(ABC):
 +
 +    def journey_cards(self, limit: int = 200) -> List[Dict[str, Any]]:
 +        """Return durable memory entries for the learning-journey graph.
@@ -673,74 +738,102 @@ index b5a9d2edc5e1d7caf625c8deaa2f616a6d1fab6b..dcf722585d9598bdb9990320fbd56030
 +        """
 +        return []
 diff --git a/apps/desktop/src/api/skills.ts b/apps/desktop/src/api/skills.ts
-index f4d32f4dcca1feb3bba40ef201964bc556fb8e90..97b7b8040fbae27e7dfad1a5b295a105781802ad 100644
+index f4d32f4dcca1feb3bba40ef201964bc556fb8e90..9a01b447b80fce906b49c71dd26c941c4ee93950 100644
 --- a/apps/desktop/src/api/skills.ts
 +++ b/apps/desktop/src/api/skills.ts
-@@ -43,15 +43,40 @@ export function setSkillEnabled(
-   })
- }
- 
+@@ -46 +46 @@ export function setSkillEnabled(
 -export function getStarmapGraph(): Promise<StarmapGraph> {
 +export function getStarmapGraph(profile?: string): Promise<StarmapGraph> {
-   return hermesApi<StarmapGraph>({
+@@ -48 +48 @@ export function getStarmapGraph(): Promise<StarmapGraph> {
 -    ...profileScoped(),
 +    ...profileScoped(profile),
-     // Backend REST contract — stays /api/learning even though the UI feature is
-     // now "star map". Renaming this would break against an un-upgraded backend.
-     path: '/api/learning/graph'
-   })
- }
- 
-+/** Fetch a merged learning graph from multiple profiles. Each node/edge/card
-+ *  is tagged with its source profile, and node ids are prefixed to avoid
-+ *  collisions. */
-+export function getStarmapGraphMultiProfile(profiles: string[]): Promise<StarmapGraph> {
-+  const params = new URLSearchParams({ profiles: profiles.join(',') })
+@@ -90,0 +91,79 @@ export function editLearningNode(
++// ---------------------------------------------------------------------------
++// Provider memory nodes — journey nodes whose facts are DERIVED by an external
++// memory provider (e.g. Honcho conclusions) rather than authored in a Hermes
++// session. These helpers expose the source corpus behind such a node so a user
++// can audit provenance ("where did this fact come from?") and, if useful,
++// resurrect the originating conversation as a first-class Hermes session.
++// ---------------------------------------------------------------------------
 +
-+  return hermesApi<StarmapGraph>({
-+    path: `/api/learning/graph?${params.toString()}`
++/** One raw message from a provider-side session (journey source corpus). */
++export interface ProviderSessionMessage {
++  content: string
++  peer: string
++  /** 'user' | 'assistant' when the provider knows which peer is the human. */
++  role?: string
++  /** Unix seconds, or null when the provider didn't record a time. */
++  timestamp: null | number
++}
++
++export interface ProviderSessionResponse {
++  messages: ProviderSessionMessage[]
++  provider: null | string
++  session_id: string
++}
++
++/** Source corpus behind a provider-contributed journey node — the raw
++ *  provider-side conversation a derived fact (e.g. a Honcho conclusion)
++ *  came from. Empty `messages` means unavailable, not an error. */
++export function getLearningProviderSession(sessionId: string): Promise<ProviderSessionResponse> {
++  return window.hermesDesktop.api<ProviderSessionResponse>({
++    ...profileScoped(),
++    path: `/api/learning/provider-session?session_id=${encodeURIComponent(sessionId)}`
 +  })
 +}
 +
-+/** Cross-profile memory insertion: copy a node's content from one profile
-+ *  into another profile's MEMORY.md. */
-+export function crossInsertLearningNode(
-+  id: string,
-+  sourceProfile: string,
-+  targetProfile: string
-+): Promise<{ message: string; ok: boolean }> {
-+  return hermesApi<{ message: string; ok: boolean }>({
-+    body: { id, source_profile: sourceProfile, target_profile: targetProfile },
++export interface MaterializedProviderSession {
++  created: boolean
++  message_count: number
++  ok: boolean
++  provider: null | string
++  session_id: string
++  title: string
++}
++
++/** Recreate a provider-side conversation (journey source corpus) as a real
++ *  Hermes session, so it can be read and continued like any other session.
++ *  Idempotent: an already-materialized conversation returns `created: false`
++ *  with the same session id. */
++export function materializeLearningProviderSession(sessionId: string): Promise<MaterializedProviderSession> {
++  return window.hermesDesktop.api<MaterializedProviderSession>({
++    ...profileScoped(),
++    path: '/api/learning/provider-session/materialize',
 +    method: 'POST',
-+    path: '/api/learning/node/cross-insert'
++    body: { session_id: sessionId }
 +  })
 +}
 +
- export interface LearningNodeDetail {
-   content: string
-   kind: 'memory' | 'skill'
++/** Safe, provenance-tagged draft text for recalling a journey node into a
++ *  session as reference context. The recalled body is scanned, delimiter-
++ *  defanged, and wrapped in an untrusted-data block server-side — the caller
++ *  stashes `text` as the target session's composer draft (user reviews + sends). */
++export interface LearningRecallDraft {
++  connected_count: number
++  /** Threat-scan pattern ids matched in the recalled body (empty = clean). */
++  findings: string[]
++  id: string
++  kind: 'memory' | 'skill'
++  label: string
++  ok: boolean
++  text: string
++  truncated: boolean
++}
++
++export function getLearningRecallDraft(id: string): Promise<LearningRecallDraft> {
++  return window.hermesDesktop.api<LearningRecallDraft>({
++    ...profileScoped(),
++    path: `/api/learning/recall-draft?id=${encodeURIComponent(id)}`
++  })
++}
++
 diff --git a/apps/desktop/src/app/chat/composer/focus.test.ts b/apps/desktop/src/app/chat/composer/focus.test.ts
-index 2b3cb782e14ed5b96d1be100efd849672c5987db..c8fcf47f496ed097048be51eeaecec26ab5e6693 100644
+index 76f6ce9eae46515ec41a896609a688a0d239aeae..642ac46d5e0012aa3b6c6a38c3dd85eb60383842 100644
 --- a/apps/desktop/src/app/chat/composer/focus.test.ts
 +++ b/apps/desktop/src/app/chat/composer/focus.test.ts
-@@ -8,9 +8,11 @@ import {
-   getActiveComposer,
-   markActiveComposer,
-   onComposerFocusRequest,
-+  onComposerInsertRequest,
-   onComposerModelMenuRequest,
-   releaseActiveComposer,
-   requestComposerFocus,
-+  requestComposerInsert,
-   requestModelMenuToggle
- } from './focus'
- import { RICH_INPUT_SLOT } from './rich-editor'
-@@ -224,6 +226,42 @@ describe('resolveActive / keep-alive tab heal', () => {
-     expect(getActiveComposer()).toBe('tile:front')
-   })
- 
+@@ -235,0 +236,36 @@ describe('resolveActive / keep-alive tab heal', () => {
 +  it('delivers an active-target INSERT to the visible tile, not the buried main (/recall)', async () => {
-+    // Repro for the reported "/recall → Insert into this chat does nothing":
++    // Regression: "/recall → Insert into this chat" must populate the composer:
 +    // the star map is opened over a session TILE, so the visible composer is
 +    // tile:… while main sits mounted under data-pane-hidden. A recall insert
 +    // hardcoded to 'main' wrote into that off-screen composer. The fix routes
@@ -775,22 +868,21 @@ index 2b3cb782e14ed5b96d1be100efd849672c5987db..c8fcf47f496ed097048be51eeaecec26
 +    expect(saw).toEqual(['main:recalled knowledge'])
 +  })
 +
-   it('heals an edit claim once the edit root is gone (no release site needed)', async () => {
-     mountSurface('main')
-     markActiveComposer('edit')
 diff --git a/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.test.tsx b/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.test.tsx
-index 518090d96ccb1c4913a4b433ea66cb988a7b708d..70f618c33ff6a4a912e1a559145cd41939fe059a 100644
+index 4cc1ec9f81d71c63e86e4cf98ab8e444bef4ac48..00e470338a44bfd6d97c3793cdd2de689309399a 100644
 --- a/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.test.tsx
 +++ b/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.test.tsx
-@@ -184,4 +184,42 @@ describe('useSlashCompletions', () => {
-     expect(groupOf('/compress')).toBe('Commands')
-     expect(groupOf('/docx')).toBe('Skills')
-   })
+@@ -172 +172 @@ describe('useSlashCompletions', () => {
+-    expect(commandsOf(items)).toEqual(['/refine', '/compress', '/docx'])
++    expect(commandsOf(items)).toEqual(['/refine', '/compress', '/recall', '/docx'])
+@@ -174,0 +175 @@ describe('useSlashCompletions', () => {
++    expect(groupOf('/recall')).toBe('Commands')
+@@ -176,0 +178,38 @@ describe('useSlashCompletions', () => {
 +
 +  // /recall is a desktop-only command with no backend twin, so the backend
 +  // completion source (commands.catalog / complete.slash) never returns it.
-+  // The fetcher must seed it locally or it can run on Enter without appearing
-+  // in autocomplete.
++  // The fetcher must seed it locally or it "runs on Enter but never appears in
++  // autocomplete".
 +  it('surfaces desktop-only /recall on a bare slash even though the backend omits it', async () => {
 +    const request = vi.fn().mockResolvedValue(CATALOG)
 +    const api = harness({ request } as unknown as HermesGateway)
@@ -799,9 +891,9 @@ index 518090d96ccb1c4913a4b433ea66cb988a7b708d..70f618c33ff6a4a912e1a559145cd419
 +  })
 +
 +  it('surfaces desktop-only /recall for a typed query the backend has no match for', async () => {
-+    const request = vi.fn().mockImplementation((method: string) =>
-+      Promise.resolve(method === 'commands.catalog' ? CATALOG : { items: [] })
-+    )
++    const request = vi
++      .fn()
++      .mockImplementation((method: string) => Promise.resolve(method === 'commands.catalog' ? CATALOG : { items: [] }))
 +
 +    const api = harness({ request } as unknown as HermesGateway)
 +
@@ -824,25 +916,15 @@ index 518090d96ccb1c4913a4b433ea66cb988a7b708d..70f618c33ff6a4a912e1a559145cd419
 +
 +    expect(journeys).toEqual(['/journey'])
 +  })
- })
 diff --git a/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.ts b/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.ts
-index a22dbe681301ff9803941e2980267e193550f963..44320d3bfbe11fda176142492a25b3449b655ae8 100644
+index a41e7f561c5534be4d37e80a81cf16555f6ab490..f87303dc20a8a208324370b784e12db657e64ef6 100644
 --- a/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.ts
 +++ b/apps/desktop/src/app/chat/composer/hooks/use-slash-completions.ts
-@@ -5,7 +5,9 @@ import { useCallback, useEffect } from 'react'
- import type { HermesGateway } from '@/hermes'
- import { sessionTitle } from '@/lib/chat-runtime'
- import {
+@@ -8,0 +9 @@ import {
 +  canonicalDesktopSlashCommand,
-   type CommandsCatalogLike,
+@@ -9,0 +11 @@ import {
 +  desktopBuiltinSlashCompletions,
-   desktopSkinSlashCompletions,
-   desktopSlashDescription,
-   type DesktopThemeCommandOption,
-@@ -51,6 +53,24 @@ function commandText(value: string): string {
-   return value.startsWith('/') ? value : `/${value}`
- }
- 
+@@ -54,0 +57,18 @@ function commandText(value: string): string {
 +/**
 + * Append desktop-only built-in commands (e.g. `/recall`) that the backend
 + * completion source never emits, so autocomplete discovery matches local
@@ -861,45 +943,19 @@ index a22dbe681301ff9803941e2980267e193550f963..44320d3bfbe11fda176142492a25b344
 +  return missing.length ? [...items, ...missing] : items
 +}
 +
- /** How many recent sessions to surface inline before the "Browse all…" entry. */
- const SESSION_INLINE_LIMIT = 7
- 
-@@ -191,7 +211,7 @@ export function useSlashCompletions(options: {
-           // query takes the other branch, where nothing is hidden.
-           items.push(...rankSkillCommands(skillRows, catalog.skills, { pruneUnusedBuiltins: true }))
- 
+@@ -206 +226 @@ export function useSlashCompletions(options: {
 -          return { items, query }
 +          return { items: withDesktopOnlyBuiltins(items, query), query }
-         }
- 
-         const result = await cachedSlashCompletion(`slash:${text.toLowerCase()}`, () =>
-@@ -242,7 +262,9 @@ export function useSlashCompletions(options: {
-           return { items: decorated, query }
-         }
- 
+@@ -260 +280 @@ export function useSlashCompletions(options: {
 -        const items = [...decorated].sort(
-+        const completions = decorated.length ? decorated : withDesktopOnlyBuiltins(decorated, query)
-+
-+        const items = [...completions].sort(
-           (a, b) => groupOrder.indexOf(a.group ?? '') - groupOrder.indexOf(b.group ?? '')
-         )
- 
++        const items = [...withDesktopOnlyBuiltins(decorated, query)].sort(
 diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/slash.ts b/apps/desktop/src/app/session/hooks/use-prompt-actions/slash.ts
-index 44dc819ffdc0b6cca191d9d503883bc25fa9c26a..eddd4d9e6cda0b09eeb8c07803a273852ffaaba5 100644
+index 6cb86bd3a02edde6f8581a966f09871302cc7d1f..042899dfa86d1d1d2f8f71257d8348372e2c6084 100644
 --- a/apps/desktop/src/app/session/hooks/use-prompt-actions/slash.ts
 +++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/slash.ts
-@@ -42,6 +42,7 @@ import {
-   setYoloActive
- } from '@/store/session'
- import { $sessionStates } from '@/store/session-states'
+@@ -47,0 +48 @@ import { $sessionStates } from '@/store/session-states'
 +import { openStarmapRecall } from '@/store/starmap'
- import {
-   applyWakeStartResult,
-   applyWakeStatus,
-@@ -1000,6 +1001,16 @@ export function useSlashCommand(deps: SlashCommandDeps) {
-         journey: async () => {
-           openMemoryGraph()
-         },
+@@ -1051,0 +1053,10 @@ export function useSlashCommand(deps: SlashCommandDeps) {
 +        // /recall opens the SAME memory-graph overlay as /journey, but in
 +        // "recall mode": the search sidebar opens focused so the user can find a
 +        // memory/skill/conclusion and insert its knowledge (as reviewed
@@ -910,17 +966,11 @@ index 44dc819ffdc0b6cca191d9d503883bc25fa9c26a..eddd4d9e6cda0b09eeb8c07803a27385
 +          openStarmapRecall()
 +          openMemoryGraph()
 +        },
-         // /hatch opens the pet generator overlay (the desktop's rich, multi-step
-         // generate→pick→hatch→adopt flow). A typed description seeds the prompt
-         // so `/hatch a cyber fox` lands on the composer step prefilled.
 diff --git a/apps/desktop/src/app/starmap/color.ts b/apps/desktop/src/app/starmap/color.ts
 index acc23fbde59de6c1faa3a714b3d9df9fd6878a9d..132935f2ef1ec11fab89c2a468314f47d870f368 100644
 --- a/apps/desktop/src/app/starmap/color.ts
 +++ b/apps/desktop/src/app/starmap/color.ts
-@@ -105,6 +105,17 @@ export function memoryInkFor(primary: Rgb, bg: Rgb): Rgb {
-   return mixRgb(complementaryInk(primary), bg, 0.45)
- }
- 
+@@ -107,0 +108,11 @@ export function memoryInkFor(primary: Rgb, bg: Rgb): Rgb {
 +// Conclusion ink: a bright, high-saturation accent so durable derived facts
 +// (Honcho conclusions) POP as the map's most important nodes. Rotated off the
 +// theme primary by a third-turn (distinct from both the primary/skill hue and
@@ -932,29 +982,17 @@ index acc23fbde59de6c1faa3a714b3d9df9fd6878a9d..132935f2ef1ec11fab89c2a468314f47
 +  return hslToRgb(h + 55, Math.max(s, 0.7), clamp(l, 0.55, 0.72))
 +}
 +
- // Resolve the theme-derived palette once per theme change — the resolveRgb probe
- // does a getImageData readback, so this stays out of the per-frame path. Node
- // groups borrow restrained tint from the theme; structure stays foreground ink.
-@@ -131,6 +142,7 @@ export function computePalette(canvas: HTMLCanvasElement): Palette {
-     chipBg: darkTheme ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.85)',
-     darkTheme,
-     inkInv: darkTheme ? 'rgba(0,0,0,1)' : 'rgba(255,255,255,1)',
+@@ -133,0 +145 @@ export function computePalette(canvas: HTMLCanvasElement): Palette {
 +    conclusionInk: conclusionInkFor(primary),
-     memoryInk: memoryInkFor(primary, bg),
-     primary,
-     skillInk: mixRgb(primary, base, darkTheme ? 0.12 : 0.18)
 diff --git a/apps/desktop/src/app/starmap/index.tsx b/apps/desktop/src/app/starmap/index.tsx
-index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f176c4b527 100644
+index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..48dbbe0d9e85ccdbc982979def6e942603910a87 100644
 --- a/apps/desktop/src/app/starmap/index.tsx
 +++ b/apps/desktop/src/app/starmap/index.tsx
-@@ -1,15 +1,34 @@
- import { useStore } from '@nanostores/react'
- import { useEffect, useState } from 'react'
- 
+@@ -3,0 +4 @@ import { useEffect, useState } from 'react'
 +import { requestComposerInsert } from '@/app/chat/composer/focus'
- import { PageLoader } from '@/components/page-loader'
-+import { crossInsertLearningNode, getLearningRecallDraft } from '@/hermes'
- import { useI18n } from '@/i18n'
+@@ -4,0 +6 @@ import { PageLoader } from '@/components/page-loader'
++import { getLearningRecallDraft } from '@/hermes'
+@@ -6 +8,14 @@ import { useI18n } from '@/i18n'
 -import { $starmapError, $starmapGraph, $starmapLoading, loadStarmapGraph } from '@/store/starmap'
 +import { sessionTitle } from '@/lib/chat-runtime'
 +import { stashSessionDraft, takeSessionDraft } from '@/store/composer'
@@ -970,34 +1008,16 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +  clearStarmapRecall,
 +  loadStarmapGraph
 +} from '@/store/starmap'
- import type { StarmapGraph } from '@/types/hermes'
- 
- import { Panel, PanelEmpty } from '../overlays/panel'
- 
-+import { type RecallNodeRef, resolveRecallTarget } from './recall'
- import { StarMap } from './star-map'
- 
+@@ -12,0 +28,3 @@ import { StarMap } from './star-map'
 +// How many most-recently-active sessions the "Add to a session" submenu offers.
 +const RECALL_RECENT_SESSIONS = 5
 +
- // Star map overlay: a top-down map of what Hermes has learned for a profile,
- // over a radial time axis. Data is fetched on demand into the $starmap* atoms;
- // the map itself lives in ./star-map. The chrome is owned by the map itself
-@@ -20,6 +39,10 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
-   const graph = useStore($starmapGraph)
-   const loading = useStore($starmapLoading)
-   const error = useStore($starmapError)
+@@ -22,0 +41,4 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
 +  const sessions = useStore($sessions)
 +  // Raised by `/recall`: open the search sidebar focused and offer "insert into
 +  // this chat" on nodes. Cleared here on close so a later `/journey` opens plain.
 +  const recallMode = useStore($starmapRecallMode)
- 
-   // A pasted share code populates the map with someone else's (or an exported)
-   // graph, overriding the live profile scan. Cleared by "back to my map" and
-@@ -37,8 +60,51 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
- 
-   const shown = imported ?? graph
- 
+@@ -39,0 +62,35 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
 +  const closeAndReset = () => {
 +    clearStarmapRecall()
 +    onClose()
@@ -1015,17 +1035,9 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +  // Fetch the injection-hardened, provenance-tagged draft for a node. The body
 +  // is scanned + defanged + wrapped server-side; we only place the returned
 +  // text. Returns null (after a toast) when the node has no recallable content.
-+  //
-+  // Multi-profile mode: node ids arrive PREFIXED (`<profile>:<id>`) and the
-+  // node may live in a DIFFERENT profile than the active one — resolve the
-+  // unprefixed id and scope the request to the node's own profile, mirroring
-+  // the onInsertIntoProfile contract (same bug class: the server only knows
-+  // original ids).
-+  const fetchRecallText = async (node: RecallNodeRef): Promise<null | string> => {
-+    const target = resolveRecallTarget(node)
-+
++  const fetchRecallText = async (node: { id: string; kind: 'memory' | 'skill'; label: string }): Promise<null | string> => {
 +    try {
-+      const draft = await getLearningRecallDraft(target.id, target.profile)
++      const draft = await getLearningRecallDraft(node.id)
 +
 +      if (!draft.ok || !draft.text.trim()) {
 +        notify({ kind: 'warning', message: t.starmap.recallFailed })
@@ -1041,19 +1053,13 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +    }
 +  }
 +
-   return (
+@@ -41 +98 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
 -    <Panel closeLabel={t.starmap.close} onClose={onClose}>
 +    <Panel closeLabel={t.starmap.close} onClose={closeAndReset}>
-       {error ? (
-         <PanelEmpty description={error} icon="warning" title={t.starmap.loadFailed} />
-       ) : !shown && loading ? (
-@@ -49,8 +115,98 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
-         <StarMap
-           graph={shown}
-           imported={imported !== null}
+@@ -51,0 +109,19 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
 +          initialSearchFocus={recallMode}
 +          onAddToSession={async (node, sessionKey) => {
-+            // Feature A — stash the node's knowledge into an EXISTING session's
++            // Stash the node's knowledge into an EXISTING session's
 +            // composer as a reviewed draft. Never clobber an in-progress draft:
 +            // read what's there and append. The user opens that session, reviews
 +            // the draft, and sends it (the human gate — nothing auto-sent).
@@ -1070,35 +1076,7 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +            const target = recentSessions.find(s => s.key === sessionKey)
 +            notify({ kind: 'success', message: t.starmap.addToSessionDone(target?.title ?? node.label) })
 +          }}
-           onImport={setImported}
-+          onInsertIntoProfile={async (node, targetProfile) => {
-+            // Cross-profile insert: copy this node's content into another profile's
-+            // MEMORY.md. The source profile is embedded in the node; we use the
-+            // _originalId to fetch the content without the profile prefix.
-+            if (!node.profile) {
-+              notify({ kind: 'warning', message: t.starmap.crossProfileInsertFailed })
-+
-+              return
-+            }
-+
-+            try {
-+              // Same addressing contract as recall: unprefixed id, node's own
-+              // profile (shared resolver — see recall.ts).
-+              const { id: nodeId } = resolveRecallTarget(node)
-+
-+              const result = await crossInsertLearningNode(nodeId, node.profile, targetProfile)
-+
-+              if (result.ok) {
-+                notify({ kind: 'success', message: t.starmap.insertIntoProfileDone(targetProfile) })
-+                // Refresh the graph to show the new entry
-+                void loadStarmapGraph(true)
-+              } else {
-+                notify({ kind: 'warning', message: result.message || t.starmap.crossProfileInsertFailed })
-+              }
-+            } catch {
-+              notify({ kind: 'warning', message: t.starmap.crossProfileInsertFailed })
-+            }
-+          }}
+@@ -52,0 +129,32 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
 +          onOpenSession={id => {
 +            // Drill-down from a node: open the conversation as a tile stacked
 +            // into the main zone, then close the map so it's readable.
@@ -1106,7 +1084,7 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +            closeAndReset()
 +          }}
 +          onRecallIntoChat={async node => {
-+            // Feature B (/recall) — insert the node's knowledge into the chat
++            // /recall: insert the node's knowledge into the chat
 +            // the user is actually looking at, for review (never auto-sent).
 +            //
 +            // Target the ACTIVE composer, not a hardcoded 'main': the star map
@@ -1131,7 +1109,7 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +            closeAndReset()
 +            setTimeout(() => requestComposerInsert(text, { mode: 'block' }), 0)
 +          }}
-           onResetMap={() => setImported(null)}
+@@ -53,0 +162,11 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
 +          onStartConversation={conclusion => {
 +            // Seed a NEW chat with the conclusion quoted as context — the user
 +            // reviews and sends (never auto-sent). Open the fresh session, then
@@ -1143,99 +1121,56 @@ index 28d825ac8509361d2fdb5bd0ff9bd2b3ccf588e5..74b744282b417de651274efc0f7656f1
 +            closeAndReset()
 +          }}
 +          recentSessions={recentSessions}
-         />
-       ) : null}
-     </Panel>
 diff --git a/apps/desktop/src/app/starmap/node-context-menu.test.tsx b/apps/desktop/src/app/starmap/node-context-menu.test.tsx
-index 6558d258ceb5632bbda7a3bd4f7e40683a31b011..4c4470f4dcbdfbf2783878622fcb2f558363f293 100644
+index e2e6b9b13f5412e6732b27a1a767d801793daeca..ccc3c71c64981876c0a0e07dc9486ab89a64fe85 100644
 --- a/apps/desktop/src/app/starmap/node-context-menu.test.tsx
 +++ b/apps/desktop/src/app/starmap/node-context-menu.test.tsx
-@@ -1,4 +1,5 @@
- import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-+import { atom } from 'nanostores'
- import { afterEach, describe, expect, it, vi } from 'vitest'
- 
- import { NodeContextMenu, type NodeMenuTarget } from './node-context-menu'
-@@ -14,7 +15,12 @@ vi.mock('@/hermes', () => ({
-   getLearningNode: vi.fn()
- }))
- vi.mock('@/store/notifications', () => ({ notifyError: vi.fn() }))
+@@ -11,5 +11,10 @@ vi.mock('@/components/chat/code-editor', () => ({ CodeEditor: () => null }))
+-vi.mock('@/hermes', () => ({
+-  deleteLearningNode: vi.fn(),
+-  editLearningNode: vi.fn(),
+-  getLearningNode: vi.fn()
+-}))
++vi.mock('@/hermes', async importOriginal => {
++  const actual = await importOriginal<typeof import('@/hermes')>()
++
++  return {
++    ...actual,
++    deleteLearningNode: vi.fn(),
++    editLearningNode: vi.fn(),
++    getLearningNode: vi.fn()
++  }
++})
+@@ -17 +22,5 @@ vi.mock('@/store/notifications', () => ({ notifyError: vi.fn() }))
 -vi.mock('@/store/starmap', () => ({ evictStarmapNode: vi.fn(), loadStarmapGraph: vi.fn() }))
-+vi.mock('@/store/profile', () => ({
-+  $profiles: atom([]),
-+  normalizeProfileKey: (name: string) => name,
-+  profileLabel: (profile: { name: string }) => profile.name
-+}))
-+vi.mock('@/store/starmap', () => ({ $starmapSelectedProfiles: atom([]), evictStarmapNode: vi.fn(), loadStarmapGraph: vi.fn() }))
- vi.mock('../hooks/use-on-profile-switch', () => ({ useOnProfileSwitch: vi.fn() }))
- 
- const target: NodeMenuTarget = { id: 'memory-1', kind: 'memory', label: 'Test memory', x: 1000, y: 750 }
-@@ -23,7 +29,7 @@ afterEach(cleanup)
- 
- describe('NodeContextMenu', () => {
-   it('opens a collision-aware menu anchored at the click point', async () => {
--    render(<NodeContextMenu onClose={vi.fn()} onNodeRemoved={vi.fn()} target={target} />)
-+    render(<NodeContextMenu onClose={vi.fn()} onNodeRemoved={vi.fn()} onShowProvenance={vi.fn()} target={target} />)
- 
-     // Radix stamps the side it resolved after collision handling; the
-     // hand-rolled fixed div had no such engine and clipped near the edges.
-@@ -36,7 +42,7 @@ describe('NodeContextMenu', () => {
-   it('keeps the destructive row functional through the shared menu', async () => {
-     const onClose = vi.fn()
- 
--    render(<NodeContextMenu onClose={onClose} onNodeRemoved={vi.fn()} target={target} />)
-+    render(<NodeContextMenu onClose={onClose} onNodeRemoved={vi.fn()} onShowProvenance={vi.fn()} target={target} />)
- 
-     const row = await screen.findByRole('menuitem', { name: 'Delete memory' })
- 
++vi.mock('@/store/starmap', async importOriginal => {
++  const actual = await importOriginal<typeof import('@/store/starmap')>()
++
++  return { ...actual, evictStarmapNode: vi.fn(), loadStarmapGraph: vi.fn() }
++})
 diff --git a/apps/desktop/src/app/starmap/node-context-menu.tsx b/apps/desktop/src/app/starmap/node-context-menu.tsx
-index 58153e8b03dc4d769985fdc67b265e64962d28ff..4a06cd8f1ffc0474f56072d1811a6ce9b4c56acf 100644
+index 58153e8b03dc4d769985fdc67b265e64962d28ff..a6bc4cfed6432a1c9d7dedd86316efb91ffeab91 100644
 --- a/apps/desktop/src/app/starmap/node-context-menu.tsx
 +++ b/apps/desktop/src/app/starmap/node-context-menu.tsx
-@@ -1,3 +1,4 @@
-+import { useStore } from '@nanostores/react'
- import { useRef, useState } from 'react'
- 
- import { ArchiveSkillConfirmDialog, fireOptimistic } from '@/app/learning/archive-skill-confirm-dialog'
-@@ -10,25 +11,69 @@ import {
-   DropdownMenuContent,
-   DropdownMenuItem,
-   DropdownMenuLabel,
+@@ -12,0 +13,3 @@ import {
 +  DropdownMenuSub,
 +  DropdownMenuSubContent,
 +  DropdownMenuSubTrigger,
-   DropdownMenuTrigger
- } from '@/components/ui/dropdown-menu'
- import { deleteLearningNode, editLearningNode, getLearningNode } from '@/hermes'
+@@ -15,0 +19 @@ import { deleteLearningNode, editLearningNode, getLearningNode } from '@/hermes'
 +import { useI18n } from '@/i18n'
- import { notifyError } from '@/store/notifications'
--import { evictStarmapNode, loadStarmapGraph } from '@/store/starmap'
-+import { $profiles, normalizeProfileKey, profileLabel } from '@/store/profile'
-+import { $starmapSelectedProfiles, evictStarmapNode, loadStarmapGraph } from '@/store/starmap'
- 
- import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
- 
+@@ -20,0 +25,2 @@ import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 +import { isProviderSource } from './sources'
 +
- export interface NodeMenuTarget {
-   id: string
+@@ -22,0 +29,4 @@ export interface NodeMenuTarget {
 +  /** True when this node is a Honcho conclusion (durable derived fact). Adds a
 +   *  "Start a conversation about this" action; conclusions are provider-backed
 +   *  so they stay read-only (no Edit/Delete). */
 +  isConclusion?: boolean
-   kind: 'memory' | 'skill'
-   label: string
+@@ -24,0 +35,3 @@ export interface NodeMenuTarget {
 +  /** Memory nodes only: 'memory' | 'profile' | a provider name ('honcho', …).
 +   *  Provider-backed nodes are read-only — the menu offers no Edit/Delete. */
 +  memorySource?: string
-+  /** Multi-profile mode: which profile this node belongs to. */
-+  profile?: string
-+  /** Multi-profile mode: the original node id without the profile prefix. */
-+  _originalId?: string
-   x: number
-   y: number
- }
- 
+@@ -28,0 +42,8 @@ export interface NodeMenuTarget {
 +/** One recent session offered in the "Add to a session" submenu. `key` is the
 + *  durable composer scope (lineage root) the draft is stashed under; `title` is
 + *  the display label. */
@@ -1244,67 +1179,46 @@ index 58153e8b03dc4d769985fdc67b265e64962d28ff..4a06cd8f1ffc0474f56072d1811a6ce9
 +  title: string
 +}
 +
- interface NodeContextMenuProps {
-   onClose: () => void
-   onNodeRemoved: () => void
+@@ -31,0 +53,15 @@ interface NodeContextMenuProps {
 +  /** Open the provenance dialog ("Where this came from…") for this node. */
-+  onShowProvenance: (id: string) => void
++  onShowProvenance?: (id: string) => void
 +  /** Conclusion nodes only: seed a NEW chat about this conclusion (for review
 +   *  — never auto-sent). Absent when the host doesn't support it. */
 +  onStartConversation?: (target: NodeMenuTarget) => void
-+  /** Feature A — "Add to a session": stash this node's knowledge (as a reviewed,
++  /** "Add to a session": stash this node's knowledge (as a reviewed,
 +   *  injection-hardened draft) into an existing session's composer. Given the
 +   *  durable session key. Available for ALL node kinds. */
 +  onAddToSession?: (target: NodeMenuTarget, sessionKey: string) => void
-+  /** Feature B — /recall: insert this node's knowledge into the CURRENT chat's
++  /** /recall: insert this node's knowledge into the CURRENT chat's
 +   *  composer for review. Available for ALL node kinds. */
 +  onRecallIntoChat?: (target: NodeMenuTarget) => void
-+  /** Cross-profile insert: copy this node's content into another profile's memory.
-+   *  Available when in multi-profile mode and the node kind is 'memory'. */
-+  onInsertIntoProfile?: (target: NodeMenuTarget, profileName: string) => void
 +  /** Most-recently-active sessions (already capped + ordered) for the
 +   *  "Add to a session" submenu. Empty/undefined hides that action. */
 +  recentSessions?: RecallSessionOption[]
-   target: NodeMenuTarget | null
- }
- 
-@@ -38,14 +83,30 @@ interface EditState {
-   label: string
- }
- 
+@@ -41,2 +77,14 @@ interface EditState {
 -/** Right-click actions for a star-map node: edit (modal) or delete (confirm). */
 -export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextMenuProps) {
 +/** Right-click actions for a star-map node: provenance, edit (modal), delete (confirm).
 + *  Provider-backed memory nodes are read-only (their storage lives in the
 + *  provider's backend), so Edit/Delete are replaced by a hint. */
-+export function NodeContextMenu({ onAddToSession, onClose, onInsertIntoProfile, onNodeRemoved, onRecallIntoChat, onShowProvenance, onStartConversation, recentSessions, target }: NodeContextMenuProps) {
++export function NodeContextMenu({
++  onAddToSession,
++  onClose,
++  onNodeRemoved,
++  onRecallIntoChat,
++  onShowProvenance,
++  onStartConversation,
++  recentSessions,
++  target
++}: NodeContextMenuProps) {
 +  const { t } = useI18n()
-+  const profiles = useStore($profiles)
-+  const selectedProfiles = useStore($starmapSelectedProfiles)
-   const [editing, setEditing] = useState<EditState | null>(null)
-   const [deleting, setDeleting] = useState<Omit<NodeMenuTarget, 'x' | 'y'> | null>(null)
-   const [loading, setLoading] = useState(false)
-   const [saving, setSaving] = useState(false)
-   const [error, setError] = useState<null | string>(null)
- 
-+  // In multi-profile mode, get the profiles the node can be inserted into
-+  // (all selected profiles except the node's own profile).
-+  // Guard against profiles not being an array (defensive)
-+  const crossProfileTargets = Array.isArray(profiles) && Array.isArray(selectedProfiles)
-+    ? profiles.filter(p => {
-+        const key = normalizeProfileKey(p.name)
-+
-+        return selectedProfiles.includes(key) && key !== target?.profile
-+      })
-+    : []
-+
-   // Bumped on profile switch so an in-flight openEdit fetch from profile A can't
-   // reopen the editor with A's node content after switching to B.
-   const editEpoch = useRef(0)
-@@ -128,22 +189,94 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
-             <DropdownMenuLabel className="truncate text-[0.68rem] font-normal text-muted-foreground">
-               {target.label}
-             </DropdownMenuLabel>
+@@ -124 +172 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
+-                so the destructive row can never be clipped off-window. */}
++                so every feature row stays reachable. */}
+@@ -128 +176 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
+-            <DropdownMenuLabel className="truncate text-[0.68rem] font-normal text-muted-foreground">
++            <DropdownMenuLabel className="max-w-56 truncate text-[0.68rem] font-normal text-muted-foreground">
+@@ -131,16 +179,56 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
 -            <DropdownMenuItem
 -              disabled={loading}
 -              onSelect={e => {
@@ -1321,58 +1235,26 @@ index 58153e8b03dc4d769985fdc67b265e64962d28ff..4a06cd8f1ffc0474f56072d1811a6ce9
 -            >
 -              {target.kind === 'skill' ? 'Archive skill' : 'Delete memory'}
 -            </DropdownMenuItem>
-+            <DropdownMenuItem onSelect={() => onShowProvenance(target.id)}>{t.starmap.provenanceMenu}</DropdownMenuItem>
-+            {/* Feature B — /recall: insert this node's knowledge into THIS chat.
-+                Offered for every node kind. The host fetches an
-+                injection-hardened, provenance-tagged draft and inserts it into
-+                the live composer for the user to review + send. */}
++            {onShowProvenance ? (
++              <DropdownMenuItem onSelect={() => onShowProvenance(target.id)}>
++                {t.starmap.provenanceMenu}
++              </DropdownMenuItem>
++            ) : null}
 +            {onRecallIntoChat ? (
 +              <DropdownMenuItem onSelect={() => onRecallIntoChat(target)}>{t.starmap.recallIntoChat}</DropdownMenuItem>
 +            ) : null}
-+            {/* Feature A — "Add to a session ▸": stash this node's knowledge into
-+                one of the most-recently-active sessions' composers. A real Radix
-+                submenu now that the menu is anchored through DropdownMenu. */}
 +            {onAddToSession && recentSessions && recentSessions.length > 0 ? (
 +              <DropdownMenuSub>
 +                <DropdownMenuSubTrigger>{t.starmap.addToSession}</DropdownMenuSubTrigger>
 +                <DropdownMenuSubContent>
 +                  {recentSessions.map(session => (
 +                    <DropdownMenuItem
-+                      className="max-w-72 truncate"
++                      className="max-w-64"
 +                      key={session.key}
 +                      onSelect={() => onAddToSession(target, session.key)}
 +                      title={session.title}
 +                    >
-+                      {session.title}
-+                    </DropdownMenuItem>
-+                  ))}
-+                </DropdownMenuSubContent>
-+              </DropdownMenuSub>
-+            ) : null}
-+            {/* Cross-profile insert — in multi-profile mode, offer to insert this
-+                node's content into another selected profile's memory. */}
-+            {onInsertIntoProfile && target.profile && crossProfileTargets.length > 0 ? (
-+              <DropdownMenuSub>
-+                <DropdownMenuSubTrigger>
-+                  {t.starmap.insertIntoProfile(crossProfileTargets.length === 1 ? profileLabel(crossProfileTargets[0]) : '…')}
-+                </DropdownMenuSubTrigger>
-+                <DropdownMenuSubContent>
-+                  {crossProfileTargets.length > 1 ? (
-+                    <DropdownMenuItem
-+                      className="font-medium"
-+                      onSelect={() => crossProfileTargets.forEach(p => onInsertIntoProfile(target, normalizeProfileKey(p.name)))}
-+                    >
-+                      {t.starmap.insertIntoAllSelected}
-+                    </DropdownMenuItem>
-+                  ) : null}
-+                  {crossProfileTargets.map(profile => (
-+                    <DropdownMenuItem
-+                      className="max-w-72 truncate"
-+                      key={normalizeProfileKey(profile.name)}
-+                      onSelect={() => onInsertIntoProfile(target, normalizeProfileKey(profile.name))}
-+                      title={profileLabel(profile)}
-+                    >
-+                      {profileLabel(profile)}
++                      <span className="truncate">{session.title}</span>
 +                    </DropdownMenuItem>
 +                  ))}
 +                </DropdownMenuSubContent>
@@ -1385,9 +1267,9 @@ index 58153e8b03dc4d769985fdc67b265e64962d28ff..4a06cd8f1ffc0474f56072d1811a6ce9
 +                    {t.starmap.conclusionStartConversation}
 +                  </DropdownMenuItem>
 +                ) : null}
-+                <div className="max-w-56 px-2 py-1 text-[0.68rem] text-muted-foreground">
++                <DropdownMenuLabel className="max-w-56 whitespace-normal text-[0.68rem] font-normal text-muted-foreground">
 +                  {t.starmap.providerReadOnly(target.memorySource)}
-+                </div>
++                </DropdownMenuLabel>
 +              </>
 +            ) : (
 +              <>
@@ -1409,9 +1291,6 @@ index 58153e8b03dc4d769985fdc67b265e64962d28ff..4a06cd8f1ffc0474f56072d1811a6ce9
 +                </DropdownMenuItem>
 +              </>
 +            )}
-           </DropdownMenuContent>
-         </DropdownMenu>
-       ) : null}
 diff --git a/apps/desktop/src/app/starmap/node-sessions-dialog.tsx b/apps/desktop/src/app/starmap/node-sessions-dialog.tsx
 new file mode 100644
 index 0000000000000000000000000000000000000000..c06732d144e74b322e067a02d86243414bbccb31
@@ -1724,346 +1603,37 @@ index 0000000000000000000000000000000000000000..c06732d144e74b322e067a02d8624341
 +    </Dialog>
 +  )
 +}
-diff --git a/apps/desktop/src/app/starmap/profile-selector.tsx b/apps/desktop/src/app/starmap/profile-selector.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..0e125e9ef15ade98eb84a7e803dd4f43c9fe64b6
---- /dev/null
-+++ b/apps/desktop/src/app/starmap/profile-selector.tsx
-@@ -0,0 +1,180 @@
-+import { useStore } from '@nanostores/react'
-+import { useEffect, useMemo, useState } from 'react'
-+
-+import { Button } from '@/components/ui/button'
-+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-+import { Tip } from '@/components/ui/tooltip'
-+import { useI18n } from '@/i18n'
-+import { Check, ChevronDown, Users } from '@/lib/icons'
-+import { $profiles, normalizeProfileKey, profileLabel, refreshProfiles } from '@/store/profile'
-+import { $starmapSelectedProfiles, loadStarmapGraph, toggleStarmapProfile } from '@/store/starmap'
-+import type { ProfileInfo } from '@/types/hermes'
-+
-+interface ProfileSelectorProps {
-+  /** Profile the gateway is currently on — the "primary" profile. */
-+  activeProfile: string
-+}
-+
-+/** Checkbox selector for bots to include in the multi-profile star map.
-+ *  Lives in the upper-left corner of the starmap view. */
-+export function ProfileSelector({ activeProfile }: ProfileSelectorProps) {
-+  const { t } = useI18n()
-+  const profiles = useStore($profiles)
-+  const selectedProfiles = useStore($starmapSelectedProfiles)
-+  const [open, setOpen] = useState(false)
-+
-+  // Ensure profiles are loaded on mount
-+  useEffect(() => {
-+    if (profiles.length === 0) {
-+      void refreshProfiles()
-+    }
-+  }, [profiles.length])
-+
-+  // Sort profiles: active first, then by name
-+  const sortedProfiles = useMemo(() => {
-+    const activeKey = normalizeProfileKey(activeProfile)
-+
-+    return [...profiles].sort((a, b) => {
-+      const aActive = normalizeProfileKey(a.name) === activeKey
-+      const bActive = normalizeProfileKey(b.name) === activeKey
-+
-+      if (aActive && !bActive) {return -1}
-+
-+      if (!aActive && bActive) {return 1}
-+
-+      return profileLabel(a).localeCompare(profileLabel(b))
-+    })
-+  }, [profiles, activeProfile])
-+
-+  // On first load, initialize selection to the active profile if empty
-+  useEffect(() => {
-+    if (selectedProfiles.length === 0 && activeProfile) {
-+      toggleStarmapProfile(normalizeProfileKey(activeProfile), true)
-+    }
-+  }, [activeProfile, selectedProfiles.length])
-+
-+  // Reload graph when selection changes
-+  useEffect(() => {
-+    if (selectedProfiles.length > 0) {
-+      void loadStarmapGraph(true)
-+    }
-+  }, [selectedProfiles])
-+
-+  const handleToggle = (profile: ProfileInfo, enabled: boolean) => {
-+    toggleStarmapProfile(normalizeProfileKey(profile.name), enabled)
-+  }
-+
-+  const handleSelectAll = () => {
-+    profiles.forEach(p => toggleStarmapProfile(normalizeProfileKey(p.name), true))
-+  }
-+
-+  const handleSelectNone = () => {
-+    // Always keep at least the active profile selected
-+    profiles.forEach(p => {
-+      const key = normalizeProfileKey(p.name)
-+
-+      if (key !== normalizeProfileKey(activeProfile)) {
-+        toggleStarmapProfile(key, false)
-+      }
-+    })
-+  }
-+
-+  // Don't show the selector if there's only one profile
-+  if (profiles.length <= 1) {
-+    return null
-+  }
-+
-+  const selectedCount = selectedProfiles.length
-+
-+  const label = selectedCount === 0
-+    ? t.starmap.profileNone
-+    : selectedCount === profiles.length
-+      ? t.starmap.profileAll
-+      : t.starmap.profileCount(selectedCount)
-+
-+  return (
-+    <Popover onOpenChange={setOpen} open={open}>
-+      <Tip label={t.starmap.profileSelectorHint}>
-+        <PopoverTrigger asChild>
-+          <Button
-+            className="gap-1.5 text-xs"
-+            size="sm"
-+            variant="ghost"
-+          >
-+            <Users className="size-3.5" />
-+            <span className="hidden sm:inline">{label}</span>
-+            <ChevronDown className="size-3" />
-+          </Button>
-+        </PopoverTrigger>
-+      </Tip>
-+      <PopoverContent
-+        align="start"
-+        className="w-56 p-1"
-+        side="bottom"
-+        sideOffset={4}
-+      >
-+        <div className="mb-1 flex items-center justify-between px-2 py-1">
-+          <span className="text-xs font-medium text-muted-foreground">
-+            {t.starmap.profileSelector}
-+          </span>
-+          <div className="flex gap-1">
-+            <button
-+              className="cursor-pointer text-[0.65rem] text-muted-foreground/70 hover:text-foreground"
-+              onClick={handleSelectAll}
-+              type="button"
-+            >
-+              All
-+            </button>
-+            <span className="text-muted-foreground/40">|</span>
-+            <button
-+              className="cursor-pointer text-[0.65rem] text-muted-foreground/70 hover:text-foreground"
-+              onClick={handleSelectNone}
-+              type="button"
-+            >
-+              None
-+            </button>
-+          </div>
-+        </div>
-+        <div className="max-h-64 overflow-y-auto">
-+          {sortedProfiles.map(profile => {
-+            const key = normalizeProfileKey(profile.name)
-+            const isSelected = selectedProfiles.includes(key)
-+            const isActive = key === normalizeProfileKey(activeProfile)
-+
-+            return (
-+              <button
-+                className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-(--ui-control-active-background)"
-+                key={key}
-+                onClick={() => handleToggle(profile, !isSelected)}
-+                type="button"
-+              >
-+                <div
-+                  className={`flex size-4 shrink-0 items-center justify-center rounded border ${
-+                    isSelected
-+                      ? 'border-primary bg-primary text-primary-foreground'
-+                      : 'border-muted-foreground/30'
-+                  }`}
-+                >
-+                  {isSelected && <Check className="size-3" />}
-+                </div>
-+                <span className="min-w-0 flex-1 truncate">
-+                  {profileLabel(profile)}
-+                  {isActive && (
-+                    <span className="ml-1 text-[0.6rem] text-muted-foreground/70">
-+                      (current)
-+                    </span>
-+                  )}
-+                </span>
-+                {profile.display_name && profile.display_name !== profile.name && (
-+                  <span className="shrink-0 text-[0.6rem] text-muted-foreground/50">
-+                    {profile.name}
-+                  </span>
-+                )}
-+              </button>
-+            )
-+          })}
-+        </div>
-+      </PopoverContent>
-+    </Popover>
-+  )
-+}
-diff --git a/apps/desktop/src/app/starmap/recall.test.ts b/apps/desktop/src/app/starmap/recall.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..86e7cdf4f413bd5d07db76322717d1b45431248b
---- /dev/null
-+++ b/apps/desktop/src/app/starmap/recall.test.ts
-@@ -0,0 +1,46 @@
-+import { describe, expect, it } from 'vitest'
-+
-+import { resolveRecallTarget } from './recall'
-+
-+// Regression: multi-profile nodes arrive with PREFIXED ids (`<profile>:<id>`)
-+// while the server only knows original ids — recall/insert must unprefix and
-+// scope to the node's OWN profile or every non-active-profile node 404s
-+// ("Could not load that memory to insert." toast, 2026-08-22).
-+describe('resolveRecallTarget', () => {
-+  it('passes single-profile nodes through untouched (colons in id are NOT a prefix)', () => {
-+    expect(resolveRecallTarget({ id: 'memory:honcho:1197', kind: 'memory', label: 'x' }))
-+      .toEqual({ id: 'memory:honcho:1197' })
-+    expect(resolveRecallTarget({ id: 'my-skill', kind: 'skill', label: 'x' }))
-+      .toEqual({ id: 'my-skill' })
-+  })
-+
-+  it('prefers the explicit _originalId and scopes to the node profile', () => {
-+    expect(resolveRecallTarget({
-+      _originalId: 'memory:honcho:1197',
-+      id: 'default:memory:honcho:1197',
-+      kind: 'memory',
-+      label: 'x',
-+      profile: 'default'
-+    })).toEqual({ id: 'memory:honcho:1197', profile: 'default' })
-+  })
-+
-+  it('falls back to stripping a verified profile prefix', () => {
-+    expect(resolveRecallTarget({
-+      id: 'test-deconfliction-bot:memory:memory:3',
-+      kind: 'memory',
-+      label: 'x',
-+      profile: 'test-deconfliction-bot'
-+    })).toEqual({ id: 'memory:memory:3', profile: 'test-deconfliction-bot' })
-+  })
-+
-+  it('never strips when the id does not actually start with the profile prefix', () => {
-+    // e.g. a raw id whose first segment coincidentally matches nothing — the
-+    // strip must be verified, not a blind replace.
-+    expect(resolveRecallTarget({
-+      id: 'memory:default:2',
-+      kind: 'memory',
-+      label: 'x',
-+      profile: 'default'
-+    })).toEqual({ id: 'memory:default:2', profile: 'default' })
-+  })
-+})
-diff --git a/apps/desktop/src/app/starmap/recall.ts b/apps/desktop/src/app/starmap/recall.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..6b3e762e030bc4c59b66d3b003b46a6148b32bf4
---- /dev/null
-+++ b/apps/desktop/src/app/starmap/recall.ts
-@@ -0,0 +1,34 @@
-+// Recall / insert node addressing — shared by the star-map host callbacks.
-+//
-+// In multi-profile mode graph node ids arrive PREFIXED (`<profile>:<id>`) and
-+// the node may belong to a DIFFERENT profile than the active one. The server
-+// only knows ORIGINAL (unprefixed) ids, and profile-scoped endpoints resolve
-+// content against whichever profile the request names — so every recall/insert
-+// call must (a) unprefix the id and (b) scope the request to the node's OWN
-+// profile. Dropping either half yields the "Could not load that memory to
-+// insert." toast for any node outside the active profile (404 server-side).
-+
-+/** The node fields recall/insert hosts need. `profile`/`_originalId` are only
-+ *  set in multi-profile mode. */
-+export interface RecallNodeRef {
-+  _originalId?: string
-+  id: string
-+  kind: 'memory' | 'skill'
-+  label: string
-+  profile?: string
-+}
-+
-+/** Resolve the server-addressable id + profile scope for a node.
-+ *
-+ *  Prefers the explicit `_originalId` the multi-profile merge attached; falls
-+ *  back to stripping a verified `<profile>:` prefix; single-profile nodes
-+ *  (no profile tag) pass through untouched — their ids legitimately contain
-+ *  colons (`memory:honcho:1197`), so never split on `:` blindly. */
-+export function resolveRecallTarget(node: RecallNodeRef): { id: string; profile?: string } {
-+  const id = node._originalId
-+    ?? (node.profile && node.id.startsWith(`${node.profile}:`)
-+      ? node.id.slice(node.profile.length + 1)
-+      : node.id)
-+
-+  return node.profile ? { id, profile: node.profile } : { id }
-+}
 diff --git a/apps/desktop/src/app/starmap/render.ts b/apps/desktop/src/app/starmap/render.ts
 index 12e26eab17196965d85a09a6bf8d432a67d242ca..0acd6e741cf8062c8ceabe658252ccae6d7bd9a1 100644
 --- a/apps/desktop/src/app/starmap/render.ts
 +++ b/apps/desktop/src/app/starmap/render.ts
-@@ -27,9 +27,19 @@ import type {
- export interface Scene {
-   adjacency: Map<string, Set<string>>
-   byId: Map<string, SimNode>
+@@ -29,0 +30,5 @@ export interface Scene {
 +  // Node ids that are Honcho conclusions — drawn with a distinct glyph + the
 +  // palette's conclusionInk so durable derived facts stand out. Empty when the
 +  // active provider isn't Honcho. Kept as a caller-computed set so the paint
 +  // loop never re-runs the provider classification.
 +  conclusionIds?: null | Set<string>
-   ctx: CanvasRenderingContext2D
-   dpr: number
-   fades: FadeBuckets
+@@ -32,0 +38,5 @@ export interface Scene {
 +  // Filter-only exploration: when non-null, ONLY these node ids (and links
 +  // between two of them) are painted — the rest of the map is hidden so the
 +  // user explores just the filtered subset. Null (the default) paints
 +  // everything. Distinct from the search pulse, which highlights-in-place.
 +  filterMatches?: null | Set<string>
-   focusId: null | string
-   hoverId: null | string
-   hoverLink: null | string
-@@ -166,9 +176,11 @@ export function drawScene(scene: Scene): DrawResult {
-   const {
-     adjacency,
-     byId,
+@@ -168,0 +179 @@ export function drawScene(scene: Scene): DrawResult {
 +    conclusionIds = null,
-     ctx,
-     dpr,
-     fades,
+@@ -171,0 +183 @@ export function drawScene(scene: Scene): DrawResult {
 +    filterMatches = null,
-     focusId,
-     hoverId,
-     hoverLink,
-@@ -201,7 +213,7 @@ export function drawScene(scene: Scene): DrawResult {
- 
-   const erec = (rec: number) => (frontier > 0 ? clamp(rec / frontier, 0, 1) : 1)
-   const { h, w } = size
+@@ -204 +216 @@ export function drawScene(scene: Scene): DrawResult {
 -  const { bandInk, base, bg, c, chipBg, darkTheme, inkInv, memoryInk, skillInk } = palette
 +  const { bandInk, base, bg, c, chipBg, conclusionInk, darkTheme, inkInv, memoryInk, skillInk } = palette
-   const { bandAlpha, lightSize, ringAlpha, sheen } = RING_PARAMS[darkTheme ? 'dark' : 'light']
- 
-   let animating = false
-@@ -405,6 +417,12 @@ export function drawScene(scene: Scene): DrawResult {
-       continue
-     }
- 
+@@ -407,0 +420,6 @@ export function drawScene(scene: Scene): DrawResult {
 +    // Filter-only mode: an edge shows only when BOTH endpoints survived the
 +    // filter — a dangling edge into a hidden node would read as a broken line.
 +    if (filterMatches && !(filterMatches.has(s.id) && filterMatches.has(t.id))) {
 +      continue
 +    }
 +
-     // A jump route only exists once both of its endpoints have ignited.
-     const revealed = seen(s.rec) && seen(t.rec)
- 
-@@ -467,6 +485,14 @@ export function drawScene(scene: Scene): DrawResult {
-   const revealedRings = new Set<number>()
- 
-   for (const n of nodes) {
+@@ -469,0 +488,8 @@ export function drawScene(scene: Scene): DrawResult {
 +    // Filter-only mode: hide every node that didn't survive the filter so the
 +    // user explores only the filtered subset. The node also drops out of the
 +    // fade buckets naturally (never drawn → no ease), so re-showing it later
@@ -2072,13 +1642,7 @@ index 12e26eab17196965d85a09a6bf8d432a67d242ca..0acd6e741cf8062c8ceabe658252ccae
 +      continue
 +    }
 +
-     // The land comes first: a node waits for the ring that CAPS its region (its
-     // outer date gridline) to grow in before it ignites — so the ring is always
-     // drawn before any star inside it, not after.
-@@ -508,8 +534,13 @@ export function drawScene(scene: Scene): DrawResult {
-     const sy = projY(n.y * posScale)
- 
-     ctx.globalAlpha = vis
+@@ -511,2 +537,7 @@ export function drawScene(scene: Scene): DrawResult {
 -    const nodeInk = nodeHigh ? base : n.kind === 'memory' ? memoryInk : skillInk
 -    const shape = NODE_SHAPE[n.kind]
 +    // Conclusions (Honcho durable facts) get their own vivid ink + a hexagon
@@ -2088,13 +1652,7 @@ index 12e26eab17196965d85a09a6bf8d432a67d242ca..0acd6e741cf8062c8ceabe658252ccae
 +    const isConcl = !!conclusionIds && conclusionIds.has(n.id)
 +    const nodeInk = nodeHigh ? base : isConcl ? conclusionInk : n.kind === 'memory' ? memoryInk : skillInk
 +    const shape = isConcl ? 'hexagon' : NODE_SHAPE[n.kind]
- 
-     if (shape === 'circle') {
-       // Highlighted orbs pop full bright; others darken so the sheen reads. The
-@@ -862,3 +893,70 @@ export function drawScramble({
-   ctx.restore()
-   ctx.globalAlpha = 1
- }
+@@ -864,0 +896,67 @@ export function drawScramble({
 +
 +// Search-match pulse: a breathing halo around every matched node, drawn live
 +// each frame (same layer discipline as the scramble — it's animation, so it
@@ -2648,7 +2206,7 @@ index 0000000000000000000000000000000000000000..d0b6ed8ca524201b2e4eb2cda431d722
 +}
 diff --git a/apps/desktop/src/app/starmap/search.test.ts b/apps/desktop/src/app/starmap/search.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea7efd80bdafade5790ad0ea03d64960a9fabb94
+index 0000000000000000000000000000000000000000..4d141f20f31033bd6da3efb36bcb72c06f548132
 --- /dev/null
 +++ b/apps/desktop/src/app/starmap/search.test.ts
 @@ -0,0 +1,220 @@
@@ -2714,7 +2272,7 @@ index 0000000000000000000000000000000000000000..ea7efd80bdafade5790ad0ea03d64960
 +  const g = graph(
 +    [
 +      node({ id: 'memory:honcho:0', label: 'garden plan…', origin: 'chatgpt', timestamp: 1_600_000_000 }),
-+      node({ id: 'memory:memory:1', label: 'DGX cluster facts', timestamp: 1_700_000_000 }),
++      node({ id: 'memory:memory:1', label: 'Build server notes', timestamp: 1_700_000_000 }),
 +      node({
 +        category: 'devops',
 +        createdBy: 'agent',
@@ -2727,7 +2285,7 @@ index 0000000000000000000000000000000000000000..ea7efd80bdafade5790ad0ea03d64960
 +    ],
 +    [
 +      { body: 'full tomato planting schedule for clay soil', source: 'honcho', title: 'garden plan…' },
-+      { body: 'spark cluster', source: 'memory', title: 'DGX cluster facts' }
++      { body: 'build server', source: 'memory', title: 'Build server notes' }
 +    ] as StarmapGraph['memory']
 +  )
 +
@@ -2754,7 +2312,7 @@ index 0000000000000000000000000000000000000000..ea7efd80bdafade5790ad0ea03d64960
 +  })
 +
 +  it('requires every term (AND)', () => {
-+    expect(filterNodes(g, 'cluster spark', EMPTY_FILTERS).map(n => n.id)).toEqual(['memory:memory:1'])
++    expect(filterNodes(g, 'server build', EMPTY_FILTERS).map(n => n.id)).toEqual(['memory:memory:1'])
 +    expect(filterNodes(g, 'cluster nonexistent', EMPTY_FILTERS)).toEqual([])
 +  })
 +})
@@ -2874,10 +2432,10 @@ index 0000000000000000000000000000000000000000..ea7efd80bdafade5790ad0ea03d64960
 +})
 diff --git a/apps/desktop/src/app/starmap/search.ts b/apps/desktop/src/app/starmap/search.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a5e934104a3deaccbc866cfb44b7eae48641a33d
+index 0000000000000000000000000000000000000000..44b29e2195a5988b00acbef4ee99058b90888763
 --- /dev/null
 +++ b/apps/desktop/src/app/starmap/search.ts
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,358 @@
 +import { type Codec, persistentAtom } from '@/lib/persisted'
 +import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 +
@@ -2953,11 +2511,9 @@ index 0000000000000000000000000000000000000000..a5e934104a3deaccbc866cfb44b7eae4
 +  if ((memoryProvider ?? '').trim().toLowerCase() !== 'honcho') {
 +    return false
 +  }
-+
 +  if ((n.memorySource ?? '').toLowerCase() !== 'honcho') {
 +    return false
 +  }
-+
 +  return DERIVED_LEVELS.has((n.memoryLevel ?? '').trim().toLowerCase())
 +}
 +
@@ -3069,11 +2625,17 @@ index 0000000000000000000000000000000000000000..a5e934104a3deaccbc866cfb44b7eae4
 +  const { from, to } = effectiveRange(filters)
 +  const provider = graph.memoryProvider
 +
-+  // memory:<source>:<index> ids index into graph.memory for full bodies.
++  // memory:<source>:<index>[:<fingerprint>] ids index into graph.memory for full bodies.
++  // File cards carry a fingerprint in their node id (agent.learning_graph.memory_node_id);
++  // provider cards and imported/older graphs don't — key both shapes, as star-map.tsx does.
 +  const bodyById = new Map<string, string>()
 +
 +  graph.memory.forEach((card, i) => {
 +    bodyById.set(`memory:${card.source}:${i}`, card.body)
++
++    if (card.fingerprint) {
++      bodyById.set(`memory:${card.source}:${i}:${card.fingerprint}`, card.body)
++    }
 +  })
 +
 +  const out = graph.nodes.filter(n => {
@@ -3233,18 +2795,13 @@ index 0000000000000000000000000000000000000000..a5e934104a3deaccbc866cfb44b7eae4
 +  $savedSearches.set($savedSearches.get().filter(s => savedKey(s) !== key))
 +}
 diff --git a/apps/desktop/src/app/starmap/share-code.test.ts b/apps/desktop/src/app/starmap/share-code.test.ts
-index 6cf33f869fa4dfecc1bf6c6ad53aba9b281fb731..d53d2a5db7a3ed0ce429b8fe743dedc85325e103 100644
+index 8d1c467aa316be0b9d57adf94bc39e9b253b896f..d1855d953c5b896abb90feacb465088e60d6bcfc 100644
 --- a/apps/desktop/src/app/starmap/share-code.test.ts
 +++ b/apps/desktop/src/app/starmap/share-code.test.ts
-@@ -150,10 +150,38 @@ describe('share-code', () => {
-   })
- 
-   it('rejects garbage with a ShareCodeError', () => {
+@@ -144 +144 @@ describe('share-code', () => {
 -    expect(() => decodeShareCode('not a real code !!!')).toThrow(ShareCodeError)
 +    expect(() => decodeShareCode('HMV1-not-a-real-code')).toThrow(ShareCodeError)
-     expect(() => decodeShareCode('')).toThrow(ShareCodeError)
-   })
- 
+@@ -147,0 +148,28 @@ describe('share-code', () => {
 +  it('round-trips provider memory sources (v4)', () => {
 +    const g = sampleGraph()
 +
@@ -3273,48 +2830,24 @@ index 6cf33f869fa4dfecc1bf6c6ad53aba9b281fb731..d53d2a5db7a3ed0ce429b8fe743dedc8
 +    expect(g.edges).toHaveLength(1)
 +  })
 +
-   it('rejects a corrupted (bit-flipped) code', () => {
-     const code = encodeShareCode(sampleGraph())
-     // Flip a mid-payload char (trailing base64 bits can be dropped on decode).
 diff --git a/apps/desktop/src/app/starmap/share-code.ts b/apps/desktop/src/app/starmap/share-code.ts
-index 7531715408f3d69faa0897dbb48bd31ab1f32e88..326c481448d614252adf70a679a6871a4512d38d 100644
+index d800e40ab17e48bbefad6490b365ef015dd8fb7b..d0c26fe2902b7e5edd7c1636edae072e23936afb 100644
 --- a/apps/desktop/src/app/starmap/share-code.ts
 +++ b/apps/desktop/src/app/starmap/share-code.ts
-@@ -1,6 +1,8 @@
- import { type BitReader, type BitWriter, createLoadout, Dict, idxOf, indexBits, LoadoutError } from '@/lib/loadout'
- import type { StarmapEdge, StarmapGraph, StarmapNode } from '@/types/hermes'
- 
+@@ -3,0 +4,2 @@ import type { StarmapEdge, StarmapGraph, StarmapNode } from '@/types/hermes'
 +import { isProviderSource } from './sources'
 +
- // ── Star-map share code ───────────────────────────────────────────────────────
- //
- // The body schema for a star map, riding the generic loadout codec (@/lib/loadout
-@@ -11,7 +13,7 @@ import type { StarmapEdge, StarmapGraph, StarmapNode } from '@/types/hermes'
- // dropped; labels are trimmed. DEFLATE then makes the repetitive label/category
- // text almost free. A 60-skill map is a few hundred chars.
- 
+@@ -14 +16 @@ import type { StarmapEdge, StarmapGraph, StarmapNode } from '@/types/hermes'
 -const VERSION = 3
 +const VERSION = 4 // v4: provider memory sources (dict-backed 'other' slot)
- const PREFIX = 'HML' // "Hermes Memory Loadout" — namespaces our codes like WoW's leading bytes.
- const MAX_LABEL = 64 // trim runaway memory titles so one card can't bloat the code.
- 
-@@ -19,7 +21,11 @@ const trim = (s: string): string => (s.length > MAX_LABEL ? s.slice(0, MAX_LABEL
- 
- const KINDS = ['skill', 'memory'] as const
- const STATES = ['active', 'archived', 'disabled', 'draft'] as const
+@@ -22 +24,5 @@ const STATES = ['active', 'archived', 'disabled', 'draft'] as const
 -const MEM_SOURCES = ['none', 'memory', 'profile'] as const
 +// 2-bit slot. 'other' = the source is a memory-provider name ('honcho', …),
-+// carried as a dict back-reference right after the slot (v4+). v3 encoders
++// stored as a dict back-reference right after the slot (v4+). v3 encoders
 +// never wrote index 3, so the slot stays decodable across versions.
 +const MEM_SOURCES = ['none', 'memory', 'profile', 'other'] as const
 +const OTHER_SOURCE = 3
- const CREATED_BY = ['none', 'agent', 'user'] as const
- 
- const REC_BITS = 12 // time position resolution: 1/4096 of the span — sub-pixel here.
-@@ -34,7 +40,18 @@ function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span
-   w.varint(dict.id(n.category || ''))
-   w.varint(Math.max(0, n.useCount | 0))
-   w.uint(idxOf(STATES, n.state), 2)
+@@ -37 +43,12 @@ function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span
 -  w.uint(idxOf(MEM_SOURCES, n.memorySource ?? 'none'), 2)
 +
 +  // Fixed sources use the enum slot; a provider name rides the string dict
@@ -3328,49 +2861,26 @@ index 7531715408f3d69faa0897dbb48bd31ab1f32e88..326c481448d614252adf70a679a6871a
 +    w.uint(idxOf(MEM_SOURCES, src), 2)
 +  }
 +
-   w.uint(idxOf(CREATED_BY, n.createdBy ?? 'none'), 2)
-   w.bit(n.pinned)
- 
-@@ -49,13 +66,16 @@ function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span
-   }
- }
- 
+@@ -52 +69 @@ function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span
 -function readNode(r: BitReader, dict: string[], i: number, minTs: number, span: number): StarmapNode {
 +function readNode(r: BitReader, dict: string[], i: number, minTs: number, span: number, version: number): StarmapNode {
-   const kind = KINDS[r.uint(1)] ?? 'skill'
-   const label = dict[r.varint()] ?? ''
-   const category = dict[r.varint()] ?? ''
-   const useCount = r.varint()
-   const state = STATES[r.uint(2)] ?? 'active'
+@@ -58 +75,5 @@ function readNode(r: BitReader, dict: string[], i: number, minTs: number, span:
 -  const memSrc = MEM_SOURCES[r.uint(2)] ?? 'none'
 +  const memSlot = r.uint(2)
 +  // v4+: slot 3 means "provider name follows as a dict back-reference".
 +  // v3 never wrote slot 3, and carries no varint after the slot.
-+  const memSrc = version >= 4 && memSlot === OTHER_SOURCE ? (dict[r.varint()] ?? 'memory') : (MEM_SOURCES[memSlot] ?? 'none')
-   const createdBy = CREATED_BY[r.uint(2)] ?? 'none'
-   const pinned = r.bit() === 1
-   const timestamp = r.bit() === 1 ? minTs + (span > 0 ? Math.round((r.uint(REC_BITS) / REC_MAX) * span) : 0) : null
-@@ -82,10 +102,15 @@ function readNode(r: BitReader, dict: string[], i: number, minTs: number, span:
- function writeGraph(w: BitWriter, graph: StarmapGraph): void {
-   const dict = new Dict()
- 
++  const memSrc =
++    version >= 4 && memSlot === OTHER_SOURCE ? (dict[r.varint()] ?? 'memory') : (MEM_SOURCES[memSlot] ?? 'none')
+@@ -85 +106,2 @@ function writeGraph(w: BitWriter, graph: StarmapGraph): void {
 -  // Intern labels + categories; deflate later squeezes the inevitable repetition.
 +  // Intern labels + categories (and any provider source names — writeNode
 +  // emits them as dict back-references) BEFORE the dict is serialized.
-   for (const n of graph.nodes) {
-     dict.id(trim(n.label || ''))
-     dict.id(n.category || '')
+@@ -88,0 +111,4 @@ function writeGraph(w: BitWriter, graph: StarmapGraph): void {
 +
 +    if (isProviderSource(n.memorySource)) {
 +      dict.id(n.memorySource)
 +    }
-   }
- 
-   const stamps = graph.nodes.map(n => finiteTs(n.timestamp)).filter((v): v is number => v !== null)
-@@ -119,60 +144,66 @@ function writeGraph(w: BitWriter, graph: StarmapGraph): void {
-   }
- }
- 
+@@ -122,4 +148,16 @@ function writeGraph(w: BitWriter, graph: StarmapGraph): void {
 -function readGraph(r: BitReader): StarmapGraph {
 -  const minTs = r.varint()
 -  const maxTs = r.varint()
@@ -3391,32 +2901,32 @@ index 7531715408f3d69faa0897dbb48bd31ab1f32e88..326c481448d614252adf70a679a6871a
 +    for (let i = 0; i < dictLen; i += 1) {
 +      dict.push(r.str())
 +    }
- 
+@@ -127,2 +165,2 @@ function readGraph(r: BitReader): StarmapGraph {
 -  const dictLen = r.varint()
 -  const dict: string[] = []
 +    const nodeCount = r.varint()
 +    const nodes: StarmapNode[] = []
- 
+@@ -130,3 +168,3 @@ function readGraph(r: BitReader): StarmapGraph {
 -  for (let i = 0; i < dictLen; i += 1) {
 -    dict.push(r.str())
 -  }
 +    for (let i = 0; i < nodeCount; i += 1) {
 +      nodes.push(readNode(r, dict, i, minTs, span, version))
 +    }
- 
+@@ -134,2 +172,3 @@ function readGraph(r: BitReader): StarmapGraph {
 -  const nodeCount = r.varint()
 -  const nodes: StarmapNode[] = []
 +    const bits = indexBits(nodeCount)
 +    const edgeCount = r.varint()
 +    const edges: StarmapEdge[] = []
- 
+@@ -137,3 +176,3 @@ function readGraph(r: BitReader): StarmapGraph {
 -  for (let i = 0; i < nodeCount; i += 1) {
 -    nodes.push(readNode(r, dict, i, minTs, span))
 -  }
 +    for (let i = 0; i < edgeCount; i += 1) {
 +      const src = nodes[r.uint(bits)]
 +      const dst = nodes[r.uint(bits)]
- 
+@@ -141,3 +180,4 @@ function readGraph(r: BitReader): StarmapGraph {
 -  const bits = indexBits(nodeCount)
 -  const edgeCount = r.varint()
 -  const edges: StarmapEdge[] = []
@@ -3424,31 +2934,30 @@ index 7531715408f3d69faa0897dbb48bd31ab1f32e88..326c481448d614252adf70a679a6871a
 +        edges.push({ source: src.id, target: dst.id })
 +      }
 +    }
- 
+@@ -145,3 +185 @@ function readGraph(r: BitReader): StarmapGraph {
 -  for (let i = 0; i < edgeCount; i += 1) {
 -    const src = nodes[r.uint(bits)]
 -    const dst = nodes[r.uint(bits)]
 +    const counts = new Map<string, number>()
- 
+@@ -149,2 +187,2 @@ function readGraph(r: BitReader): StarmapGraph {
 -    if (src && dst) {
 -      edges.push({ source: src.id, target: dst.id })
 +    for (const n of nodes) {
 +      counts.set(n.category, (counts.get(n.category) ?? 0) + 1)
-     }
+@@ -152 +189,0 @@ function readGraph(r: BitReader): StarmapGraph {
 -  }
- 
+@@ -154 +191,3 @@ function readGraph(r: BitReader): StarmapGraph {
 -  const counts = new Map<string, number>()
 +    const clusters = [...counts.entries()]
 +      .map(([category, count]) => ({ category, count }))
 +      .sort((a, b) => b.count - a.count)
- 
+@@ -156,2 +195,3 @@ function readGraph(r: BitReader): StarmapGraph {
 -  for (const n of nodes) {
 -    counts.set(n.category, (counts.get(n.category) ?? 0) + 1)
 +    // Memory cards are dropped (viz-only); a marker lets the UI tell a decoded map
 +    // apart from a freshly-scanned one.
 +    return { clusters, edges, memory: [], nodes, stats: { imported: true } }
-   }
- 
+@@ -160,9 +199,0 @@ function readGraph(r: BitReader): StarmapGraph {
 -  const clusters = [...counts.entries()]
 -    .map(([category, count]) => ({ category, count }))
 -    .sort((a, b) => b.count - a.count)
@@ -3458,18 +2967,11 @@ index 7531715408f3d69faa0897dbb48bd31ab1f32e88..326c481448d614252adf70a679a6871a
 -  return { clusters, edges, memory: [], nodes, stats: { imported: true } }
 -}
 -
- export class ShareCodeError extends LoadoutError {}
- 
- const codec = createLoadout<StarmapGraph>({
-   error: ShareCodeError,
+@@ -172,0 +204 @@ const codec = createLoadout<StarmapGraph>({
 +  legacyReads: { 3: readGraph(3) },
-   noun: 'map code',
-   prefix: PREFIX,
+@@ -175 +207 @@ const codec = createLoadout<StarmapGraph>({
 -  read: readGraph,
 +  read: readGraph(VERSION),
-   version: VERSION,
-   write: writeGraph
- })
 diff --git a/apps/desktop/src/app/starmap/sources.ts b/apps/desktop/src/app/starmap/sources.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..84638d56cedf10bc05579b2d3e8858a9c0ac6097
@@ -3483,89 +2985,53 @@ index 0000000000000000000000000000000000000000..84638d56cedf10bc05579b2d3e8858a9
 +export const isProviderSource = (source?: null | string): source is string =>
 +  Boolean(source && source !== 'memory' && source !== 'profile')
 diff --git a/apps/desktop/src/app/starmap/star-map.tsx b/apps/desktop/src/app/starmap/star-map.tsx
-index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149e3d92428 100644
+index 20998fce06a9f22489f31731c1adf25980756930..2f3baf07de54a711202adb142405f00ebf2a9440 100644
 --- a/apps/desktop/src/app/starmap/star-map.tsx
 +++ b/apps/desktop/src/app/starmap/star-map.tsx
-@@ -1,18 +1,27 @@
-+import { useStore } from '@nanostores/react'
- import { type Simulation } from 'd3-force'
- import { atom, type WritableAtom } from 'nanostores'
- import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
- 
- import { useThemeEpoch } from '@/hooks/use-theme-epoch'
+@@ -5,0 +6,2 @@ import { useThemeEpoch } from '@/hooks/use-theme-epoch'
 +import { useI18n } from '@/i18n'
 +import { Search, SlidersHorizontal } from '@/lib/icons'
- import { createRendererLoopPauseController } from '@/lib/renderer-loop-pause'
- import { createDoubleTapDetector, isSmartZoomWheel } from '@/lib/trackpad-gestures'
-+import { $activeProfile } from '@/store/profile'
- import type { StarmapGraph } from '@/types/hermes'
- 
+@@ -10 +12 @@ import type { StarmapGraph } from '@/types/hermes'
 -import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
 +import { computePalette, conclusionInkFor, memoryInkFor, resolveRgb, rgba } from './color'
- import { RING_OUTER, TILT, ZOOM_MAX, ZOOM_MIN } from './constants'
- import { clamp, distToSegmentSq, fitScale, fitViewport, nodeRadius } from './geometry'
- import { NodeContextMenu, type NodeMenuTarget } from './node-context-menu'
+@@ -13,0 +16 @@ import { NodeContextMenu, type NodeMenuTarget } from './node-context-menu'
 +import { NodeSessionsDialog } from './node-sessions-dialog'
- import { shouldIgnorePlaybackHotkey } from './playback-hotkey'
+@@ -15 +18,3 @@ import { shouldIgnorePlaybackHotkey } from './playback-hotkey'
 -import { drawScene, drawScramble } from './render'
-+import { ProfileSelector } from './profile-selector'
-+import type { RecallNodeRef } from './recall'
 +import { drawScene, drawScramble, drawSearchPulse } from './render'
 +import { conclusionsEnabled, isConclusion } from './search'
 +import { SearchSidebar } from './search-sidebar'
- import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
- import { ShareControls } from './share-controls'
- import { buildSimulation } from './simulation'
-@@ -97,19 +106,44 @@ function RevealLabel({ axis, revealStore }: { axis: TimeAxis; revealStore: Writa
- // A tilted, top-down star map of what Hermes has learned. Time is RADIAL: oldest
- // at the core, newest on the outer rings. This component owns the refs, effects
- // and pointer wiring; layout lives in simulation.ts and painting in render.ts.
+@@ -99,0 +105 @@ function RevealLabel({ axis, revealStore }: { axis: TimeAxis; revealStore: Writa
 +
- export function StarMap({
-   graph,
-   imported = false,
+@@ -102,0 +109,2 @@ export function StarMap({
 +  initialSearchFocus = false,
 +  onAddToSession,
-   onImport,
+@@ -104 +112,5 @@ export function StarMap({
 -  onResetMap
-+  onInsertIntoProfile,
 +  onOpenSession,
 +  onRecallIntoChat,
 +  onResetMap,
 +  onStartConversation,
 +  recentSessions
- }: {
-   graph: StarmapGraph
-   imported?: boolean
+@@ -107,0 +120,2 @@ export function StarMap({
 +  /** Open with the search sidebar already focused (the /recall entry point). */
 +  initialSearchFocus?: boolean
-   onImport?: (graph: StarmapGraph) => void
-+  /** Cross-profile insert: copy a node's content into another profile's memory. */
-+  onInsertIntoProfile?: (node: { id: string; kind: 'memory' | 'skill'; label: string; profile?: string; _originalId?: string }, targetProfile: string) => void
+@@ -108,0 +123 @@ export function StarMap({
 +  onOpenSession?: (storedSessionId: string) => void
-   onResetMap?: () => void
+@@ -109,0 +125,10 @@ export function StarMap({
 +  /** Conclusion nodes only: seed a NEW chat about this conclusion's text (for
 +   *  review, never auto-sent). Wired by the host to the composer. */
 +  onStartConversation?: (conclusion: { id: string; label: string }) => void
-+  /** Feature A — stash a node's knowledge into an existing session's composer
++  /** Stash a node's knowledge into an existing session's composer
 +   *  (injection-hardened, provenance-tagged). Given node id + kind + session key. */
-+  onAddToSession?: (node: RecallNodeRef, sessionKey: string) => void
-+  /** Feature B — insert a node's knowledge into the CURRENT chat's composer. */
-+  onRecallIntoChat?: (node: RecallNodeRef) => void
++  onAddToSession?: (node: Pick<NodeMenuTarget, 'id' | 'kind' | 'label'>, sessionKey: string) => void
++  /** /recall: insert a node's knowledge into the CURRENT chat's composer. */
++  onRecallIntoChat?: (node: Pick<NodeMenuTarget, 'id' | 'kind' | 'label'>) => void
 +  /** Recent sessions offered in the "Add to a session" submenu (host-provided). */
 +  recentSessions?: { key: string; title: string }[]
- }) {
-   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-   const wrapRef = useRef<HTMLDivElement | null>(null)
+@@ -112,0 +138 @@ export function StarMap({
 +  const { t } = useI18n()
-+  const activeProfile = useStore($activeProfile)
- 
-   const simRef = useRef<null | Simulation<SimNode, SimLink>>(null)
-   const nodesRef = useRef<SimNode[]>([])
-@@ -157,6 +191,24 @@ export function StarMap({
- 
-   const [selectedId, setSelectedId] = useState<null | string>(null)
-   const [menuTarget, setMenuTarget] = useState<NodeMenuTarget | null>(null)
+@@ -159,0 +186,18 @@ export function StarMap({
 +  // Double-click drill-down: the node whose originating session(s) are shown.
 +  const [sessionsTarget, setSessionsTarget] = useState<null | SimNode>(null)
 +  // Search sidebar (toggled by the search icon). matchesRef feeds the canvas
@@ -3584,23 +3050,11 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +  // Stable "clear the sidebar's filters" callback, provided by the sidebar
 +  // (which owns the query+filter state). Lets the canvas chip reset the filter.
 +  const clearFiltersRef = useRef<(() => void) | null>(null)
-   const [size, setSize] = useState({ h: 0, w: 0 })
-   // Increments on every theme repaint (shared hook) so the legend swatch and the
-   // canvas palette re-resolve against the freshly-painted CSS custom properties.
-@@ -164,6 +216,9 @@ export function StarMap({
-   // Memory's swatch color — the same complementary-of-primary the canvas uses,
-   // so the legend matches the rendered diamonds exactly.
-   const [memoryColor, setMemoryColor] = useState('var(--theme-secondary)')
+@@ -166,0 +211,3 @@ export function StarMap({
 +  // Conclusion's swatch color — the vivid conclusionInk the canvas uses for
 +  // Honcho conclusion hexagons, so the legend + sidebar rows match.
 +  const [conclusionColor, setConclusionColor] = useState('var(--theme-primary)')
- 
-   // Time scrubber: reveal 1 = the whole map (idle default); lower values hide
-   // not-yet-reached nodes so playing/scrubbing "builds it up". revealRef feeds
-@@ -227,6 +282,68 @@ export function StarMap({
-     }
-   }, [])
- 
+@@ -229,0 +277,56 @@ export function StarMap({
 +  // Search-sidebar plumbing. Matches feed the canvas pulse via ref (paint loop
 +  // reads it directly); focus centers the viewport on the node; the row menu
 +  // reuses the exact context menu canvas nodes get.
@@ -3652,24 +3106,12 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +      kind: node.kind === 'memory' ? 'memory' : 'skill',
 +      label: node.label,
 +      memorySource: node.memorySource,
-+      // Multi-profile mode: pass the profile and original id so recall /
-+      // cross-profile ops resolve against the node's OWN profile — the canvas
-+      // path already does this; dropping it here made sidebar-opened menus
-+      // fail with "Could not load that memory" on prefixed ids.
-+      profile: node.profile,
-+      _originalId: node._originalId,
 +      x,
 +      y
 +    })
 +  }, [])
 +
-   const memById = useMemo(() => {
-     const m = new Map<string, MemoryCard>()
-     graph.memory.forEach((card, i) => m.set(`memory:${card.source}:${i}`, card))
-@@ -249,6 +366,36 @@ export function StarMap({
-     return m
-   }, [graph.edges, graph.nodes])
- 
+@@ -260,0 +364,30 @@ export function StarMap({
 +  // Whether Honcho conclusions are surfaced at all (provider gate) and the set
 +  // of node ids that ARE conclusions — computed once per graph so the paint
 +  // loop and the sidebar/legend never re-run the provider classification.
@@ -3700,38 +3142,18 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +    invalidate()
 +  }, [conclusionIds, invalidate])
 +
-   // Track the wrapper size.
-   useEffect(() => {
-     const el = wrapRef.current
-@@ -479,7 +626,9 @@ export function StarMap({
-       const bgVal =
-         style.getPropertyValue('--background').trim() || style.getPropertyValue('--dt-background').trim() || '#000'
- 
+@@ -491 +624,3 @@ export function StarMap({
 -      setMemoryColor(rgba(memoryInkFor(resolveRgb(val), resolveRgb(bgVal)), 0.9))
 +      const primaryRgb = resolveRgb(val)
 +      setMemoryColor(rgba(memoryInkFor(primaryRgb, resolveRgb(bgVal)), 0.9))
 +      setConclusionColor(rgba(conclusionInkFor(primaryRgb), 0.95))
-     }
-   }, [size, themeEpoch])
- 
-@@ -562,9 +711,13 @@ export function StarMap({
-         const { animating, ringLabelRects } = drawScene({
-           adjacency: adjacencyRef.current,
-           byId: byIdRef.current,
+@@ -573,0 +709 @@ export function StarMap({
 +          conclusionIds: conclusionIdsRef.current,
-           ctx: offCtx,
-           dpr: dprRef.current,
-           fades: fadeRef.current,
+@@ -576,0 +713,3 @@ export function StarMap({
 +          // Filter-only exploration: when the sidebar narrows, paint just the
 +          // surviving subset so the map shows only the filtered results.
 +          filterMatches: matchesRef.current,
-           focusId: selectedIdRef.current ?? hoverRef.current,
-           hoverId: hoverRef.current,
-           hoverLink: hoveredLinkRef.current,
-@@ -604,6 +757,22 @@ export function StarMap({
-         ctx.drawImage(staticCanvas, 0, 0)
-         drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
-       }
+@@ -615,0 +755,16 @@ export function StarMap({
 +
 +      // Search matches breathe on top of everything — they must stay visible
 +      // over both composite orders. Animated, so it rides the live layer with
@@ -3748,31 +3170,19 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +          vp: viewportRef.current
 +        })
 +      }
-     }
- 
-     const frame = (ts: number) => {
-@@ -691,6 +860,12 @@ export function StarMap({
-     let bestD = Infinity
- 
-     for (const n of nodesRef.current) {
+@@ -702,0 +858,6 @@ export function StarMap({
 +      // Filter-only mode: hidden (filtered-out) nodes aren't pickable — a click
 +      // or hover over the empty space they'd occupy must not select them.
 +      if (matchesRef.current && !matchesRef.current.has(n.id)) {
 +        continue
 +      }
 +
-       const r = nodeRadius(n) * nodeK + 6
-       const sx = n.x * vp.k + vp.x
-       const sy = n.y * vp.k * TILT + vp.y
-@@ -830,9 +1005,18 @@ export function StarMap({
- 
-     // A click (press without movement) toggles a ring date, a node, or clears.
-     if (drag.mode === 'pan' && !drag.moved) {
+@@ -842 +1003,3 @@ export function StarMap({
 -      // Double tap (trackpad tap-to-click may never emit a dblclick) resets view.
 +      // Double tap (trackpad tap-to-click may never emit a dblclick): on a
 +      // node it drills into the sessions that produced it; on empty space it
 +      // resets the view.
-       if (doubleTapRef.current()) {
+@@ -844 +1007,8 @@ export function StarMap({
 -        resetView()
 +        if (drag.id) {
 +          const node = byIdRef.current.get(drag.id) ?? null
@@ -3782,13 +3192,7 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +          resetView()
 +        }
 +
-         dragRef.current = { id: null, mode: 'none', moved: false, ring: null, sx: 0, sy: 0, vp: viewportRef.current }
- 
-         return
-@@ -862,6 +1046,22 @@ export function StarMap({
-     endDrag()
-   }
- 
+@@ -873,0 +1044,16 @@ export function StarMap({
 +  // Native dblclick (real mice): mirror the double-tap path — a node opens
 +  // the sessions drill-down, empty space resets. Without the node guard this
 +  // would resetView right after endDrag's double-tap already opened the
@@ -3805,69 +3209,30 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +    }
 +  }
 +
-   const onContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
-     e.preventDefault()
-     const { x, y } = localXY(e)
-@@ -874,8 +1074,16 @@ export function StarMap({
-     setSelectedId(node.id)
-     setMenuTarget({
-       id: node.id,
+@@ -885,0 +1072 @@ export function StarMap({
 +      isConclusion: !!conclusionIdsRef.current?.has(node.id),
-       kind: node.kind === 'memory' ? 'memory' : 'skill',
-       label: node.label,
+@@ -887,0 +1075,4 @@ export function StarMap({
 +      // Pass the node's source so provider-backed nodes (Honcho conclusions,
 +      // profile memory) correctly show the read-only hint + conclusion action —
 +      // the canvas path previously dropped this, unlike the sidebar path.
 +      memorySource: node.memorySource,
-+      // Multi-profile mode: pass the profile and original id for cross-profile ops
-+      profile: node.profile,
-+      _originalId: node._originalId,
-       x: e.clientX,
-       y: e.clientY
-     })
-@@ -910,8 +1118,9 @@ export function StarMap({
-     <div className="relative min-h-0 flex-1 overflow-hidden" ref={wrapRef}>
-       <canvas
-         className="block touch-none select-none text-foreground"
+@@ -921,0 +1113 @@ export function StarMap({
 +        data-hermes-context-menu-trigger=""
-         onContextMenu={onContextMenu}
+@@ -923 +1115 @@ export function StarMap({
 -        onDoubleClick={resetView}
 +        onDoubleClick={onDoubleClick}
-         onMouseDown={onMouseDown}
-         onMouseLeave={onMouseLeave}
-         onMouseMove={onMouseMove}
-@@ -921,14 +1130,131 @@ export function StarMap({
-       />
- 
-       <NodeContextMenu
+@@ -932,0 +1125,6 @@ export function StarMap({
 +        onAddToSession={
 +          onAddToSession
 +            ? (tgt, sessionKey) =>
-+                onAddToSession(
-+                  { _originalId: tgt._originalId, id: tgt.id, kind: tgt.kind, label: tgt.label, profile: tgt.profile },
-+                  sessionKey
-+                )
++                onAddToSession({ id: tgt.id, kind: tgt.kind, label: tgt.label }, sessionKey)
 +            : undefined
 +        }
-         onClose={() => setMenuTarget(null)}
-+        onInsertIntoProfile={
-+          onInsertIntoProfile
-+            ? (tgt, targetProfile) => onInsertIntoProfile({
-+                id: tgt.id,
-+                kind: tgt.kind,
-+                label: tgt.label,
-+                profile: tgt.profile,
-+                _originalId: tgt._originalId
-+              }, targetProfile)
-+            : undefined
-+        }
-         onNodeRemoved={() => {
-           setMenuTarget(null)
-           setSelectedId(null)
-         }}
+@@ -937,0 +1136,17 @@ export function StarMap({
 +        onRecallIntoChat={
 +          onRecallIntoChat
-+            ? tgt => onRecallIntoChat({ _originalId: tgt._originalId, id: tgt.id, kind: tgt.kind, label: tgt.label, profile: tgt.profile })
++            ? tgt =>
++                onRecallIntoChat({ id: tgt.id, kind: tgt.kind, label: tgt.label })
 +            : undefined
 +        }
 +        onShowProvenance={id => {
@@ -3878,14 +3243,10 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +          setSessionsTarget(node)
 +        }}
 +        onStartConversation={
-+          onStartConversation
-+            ? tgt => onStartConversation({ id: tgt.id, label: tgt.label })
-+            : undefined
++          onStartConversation ? tgt => onStartConversation({ id: tgt.id, label: tgt.label }) : undefined
 +        }
 +        recentSessions={recentSessions}
-         target={menuTarget}
-       />
- 
+@@ -940,0 +1156,79 @@ export function StarMap({
 +      <NodeSessionsDialog
 +        onClose={() => setSessionsTarget(null)}
 +        onOpenSession={id => {
@@ -3965,147 +3326,31 @@ index 56af21912e44f42d515a22e234c1324dbbe606eb..58e81f65a3298e1f298ad806b5a02149
 +        </div>
 +      ) : null}
 +
-       {/* Timeline scrubber — centered along the top, clear of the close button.
-           z-20 lifts it above the titlebar's app-region drag layer (z-10) so the
-           scrubber receives pointer events instead of dragging the window. */}
-@@ -949,6 +1275,11 @@ export function StarMap({
-         <ShareControls imported={imported} onImport={importCode} onResetMap={onResetMap} shareCode={shareCode} />
-       </div>
- 
-+      {/* Profile selector — top-left, for multi-bot memory consolidation. */}
-+      <div className="pointer-events-auto absolute left-2 top-14 z-20 [-webkit-app-region:no-drag]">
-+        <ProfileSelector activeProfile={activeProfile} />
-+      </div>
-+
-       {/* Legend — bottom-left, one entry per line like a conventional key. */}
-       <div className="pointer-events-none absolute bottom-2 left-2 flex flex-col gap-1 text-[0.62rem] text-muted-foreground">
-         <span className="flex items-center gap-1.5">
-@@ -957,6 +1288,16 @@ export function StarMap({
-         <span className="flex items-center gap-1.5">
-           <span className="inline-block size-2 rotate-45" style={{ backgroundColor: memoryColor }} /> memory
-         </span>
+@@ -968,0 +1263,13 @@ export function StarMap({
 +        {showConclusions ? (
 +          <span className="flex items-center gap-1.5">
 +            {/* Hexagon glyph mirrors the canvas conclusion node. */}
 +            <span
 +              className="inline-block size-2 shrink-0"
-+              style={{ backgroundColor: conclusionColor, clipPath: 'polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)' }}
++              style={{
++                backgroundColor: conclusionColor,
++                clipPath: 'polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)'
++              }}
 +            />{' '}
 +            {t.starmap.conclusion}
 +          </span>
 +        ) : null}
-         <span className="text-[0.58rem] text-muted-foreground/65">core = oldest · outer = newer</span>
-         <RevealLabel axis={timeAxis} revealStore={revealStore} />
-       </div>
 diff --git a/apps/desktop/src/app/starmap/types.ts b/apps/desktop/src/app/starmap/types.ts
 index ab74e5396a40303cdd87c325add99cf21e3f9f64..265a26e96f5bebcc8701ab340f62111ad77e89db 100644
 --- a/apps/desktop/src/app/starmap/types.ts
 +++ b/apps/desktop/src/app/starmap/types.ts
-@@ -64,6 +64,7 @@ export interface Palette {
-   bg: Rgb
-   c: GraphParams
-   chipBg: string
+@@ -66,0 +67 @@ export interface Palette {
 +  conclusionInk: Rgb
-   darkTheme: boolean
-   inkInv: string
-   memoryInk: Rgb
-diff --git a/apps/desktop/src/hermes.ts b/apps/desktop/src/hermes.ts
-index 09eabaaa06cc5a92eacd42ed0a8b8a9c9d450aca..f75edc0a6288683405b69a7ae37610c22efca36c 100644
---- a/apps/desktop/src/hermes.ts
-+++ b/apps/desktop/src/hermes.ts
-@@ -4,6 +4,9 @@
- // client is the one module with internals: profileScoped / connectionScoped /
- // capabilityScoped are shared across api/ but must not reach call sites, or
- // request scoping stops having a single owner.
-+
-+import { profileScoped as _profileScoped } from './api/client'
-+
- export {
-   getApiRequestConnection,
-   getApiRequestProfile,
-@@ -130,3 +133,74 @@ export type {
-   WebhookRoute,
-   WebhooksResponse
- } from '@/types/hermes'
-+
-+// ── Journey/Learning API ──────────────────────────────────────────────────
-+
-+export interface LearningRecallDraft {
-+  connected_count: number
-+  /** Threat-scan pattern ids matched in the recalled body (empty = clean). */
-+  findings: string[]
-+  id: string
-+  kind: 'memory' | 'skill'
-+  label: string
-+  ok: boolean
-+  text: string
-+  truncated: boolean
-+}
-+
-+export function getLearningRecallDraft(id: string, profile?: string): Promise<LearningRecallDraft> {
-+  const scope = profile ? { profile } : _profileScoped()
-+
-+  return window.hermesDesktop.api<LearningRecallDraft>({
-+    ...scope,
-+    path: `/api/learning/recall-draft?id=${encodeURIComponent(id)}`
-+  })
-+}
-+
-+/** One raw message from a provider-side session (journey source corpus). */
-+export interface ProviderSessionMessage {
-+  content: string
-+  peer: string
-+  /** 'user' | 'assistant' when the provider knows which peer is the human. */
-+  role?: string
-+  /** Unix seconds, or null when the provider didn't record a time. */
-+  timestamp: null | number
-+}
-+
-+export interface ProviderSessionResponse {
-+  messages: ProviderSessionMessage[]
-+  provider: null | string
-+  session_id: string
-+}
-+
-+/** Source corpus behind a provider-contributed journey node — the raw
-+ *  provider-side conversation a derived fact (e.g. a Honcho conclusion)
-+ *  came from. Empty `messages` means unavailable, not an error. */
-+export function getLearningProviderSession(sessionId: string): Promise<ProviderSessionResponse> {
-+  return window.hermesDesktop.api<ProviderSessionResponse>({
-+    ..._profileScoped(),
-+    path: `/api/learning/provider-session?session_id=${encodeURIComponent(sessionId)}`
-+  })
-+}
-+
-+export interface MaterializedProviderSession {
-+  created: boolean
-+  message_count: number
-+  ok: boolean
-+  provider: null | string
-+  session_id: string
-+  title: string
-+}
-+
-+/** Recreate a provider-side conversation (journey source corpus) as a real
-+ *  Hermes session, so it can be read and continued like any other session.
-+ *  Idempotent: an already-materialized conversation returns `created: false`
-+ *  with the same session id. */
-+export function materializeLearningProviderSession(sessionId: string): Promise<MaterializedProviderSession> {
-+  return window.hermesDesktop.api<MaterializedProviderSession>({
-+    ..._profileScoped(),
-+    path: '/api/learning/provider-session/materialize',
-+    method: 'POST',
-+    body: { session_id: sessionId }
-+  })
-+}
 diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
-index 3014a98acb0f654fc169ff3ec449908c7a6de805..b91819bee54d6f06a7fb2879f0d205f6150325b0 100644
+index 30159da1b7f618134a9a2e2ec1e4915c5d5aa316..e900b36a68729940244fcd5af659291672873eaa 100644
 --- a/apps/desktop/src/i18n/en.ts
 +++ b/apps/desktop/src/i18n/en.ts
-@@ -1795,7 +1795,74 @@ export const en: Translations = {
-     importEmpty: 'Paste a map code to load it.',
-     importSuccess: nodes => `Loaded a map with ${nodes} ${nodes === 1 ? 'node' : 'nodes'}.`,
-     importedBadge: 'imported map',
+@@ -2568 +2568,56 @@ export const en: Translations = {
 -    resetToMine: 'Back to my map'
 +    resetToMine: 'Back to my map',
 +    sessionsTitle: 'Where this came from',
@@ -4162,30 +3407,12 @@ index 3014a98acb0f654fc169ff3ec449908c7a6de805..b91819bee54d6f06a7fb2879f0d205f6
 +    recallIntoChat: 'Insert into this chat',
 +    addToSession: 'Add to a session',
 +    addToSessionDone: (title: string) => `Added to "${title}" — open it to review and send.`,
-+    recallFailed: 'Could not load that memory to insert.',
-+    // Multi-profile mode (bot memory consolidation)
-+    profileSelector: 'Select bots',
-+    profileSelectorHint: 'Check bots to include their memories and skills on this map.',
-+    profileAll: 'All bots',
-+    profileNone: 'No bots selected',
-+    profileCount: (n: number) => `${n} ${n === 1 ? 'bot' : 'bots'} selected`,
-+    profileBadge: (name: string) => name,
-+    insertIntoProfile: (name: string) => `Insert into ${name}`,
-+    insertIntoAllSelected: 'Insert into all selected bots',
-+    insertIntoProfileDone: (name: string) => `Inserted into ${name}'s memory.`,
-+    insertIntoAllDone: (n: number) => `Inserted into ${n} ${n === 1 ? 'bot' : 'bots'}.`,
-+    crossProfileInsertFailed: "Could not insert into that bot's memory."
-   },
-   agents: {
-     extendedTranscript: 'Extended transcript',
++    recallFailed: 'Could not load that memory to insert.'
 diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
-index baf2a1b20689953f124852f5df5ed12ac53831cf..89c0139c4c42f3e2632260206945297067d86aa9 100644
+index b6f8463be1c92a71a0e68a3831b1bfda5d94f770..9764e7cbb80f5bfa60369553380c593eae13e1aa 100644
 --- a/apps/desktop/src/i18n/types.ts
 +++ b/apps/desktop/src/i18n/types.ts
-@@ -1586,6 +1586,70 @@ export interface Translations {
-     importSuccess: (nodes: number) => string
-     importedBadge: string
-     resetToMine: string
+@@ -2179,0 +2180,52 @@ export interface Translations {
 +    sessionsTitle: string
 +    sessionsLoading: string
 +    sessionsEmpty: string
@@ -4238,29 +3465,11 @@ index baf2a1b20689953f124852f5df5ed12ac53831cf..89c0139c4c42f3e26322602069452970
 +    addToSession: string
 +    addToSessionDone: (title: string) => string
 +    recallFailed: string
-+    // Multi-profile mode
-+    profileSelector: string
-+    profileSelectorHint: string
-+    profileAll: string
-+    profileNone: string
-+    profileCount: (n: number) => string
-+    profileBadge: (name: string) => string
-+    insertIntoProfile: (name: string) => string
-+    insertIntoAllSelected: string
-+    insertIntoProfileDone: (name: string) => string
-+    insertIntoAllDone: (n: number) => string
-+    crossProfileInsertFailed: string
-   }
-   agents: {
-     extendedTranscript: string
 diff --git a/apps/desktop/src/i18n/zh.ts b/apps/desktop/src/i18n/zh.ts
-index 2d6f87f884469b4586e28583d0a64a3184bd8057..fe3000b67447cd6997d2a930d050bda632277715 100644
+index 3675658d2dbab0c1576775183840125777b3c9b6..4ca951624d68570d8c605768e85418f589a0cebf 100644
 --- a/apps/desktop/src/i18n/zh.ts
 +++ b/apps/desktop/src/i18n/zh.ts
-@@ -1991,7 +1991,71 @@ export const zh = defineLocale({
-     importEmpty: '粘贴图谱代码以加载。',
-     importSuccess: nodes => `已加载包含 ${nodes} 个节点的图谱。`,
-     importedBadge: '导入的图谱',
+@@ -2392 +2392,53 @@ export const zh = defineLocale({
 -    resetToMine: '返回我的图谱'
 +    resetToMine: '返回我的图谱',
 +    sessionsTitle: '知识来源',
@@ -4314,38 +3523,68 @@ index 2d6f87f884469b4586e28583d0a64a3184bd8057..fe3000b67447cd6997d2a930d050bda6
 +    recallIntoChat: '插入到当前对话',
 +    addToSession: '添加到会话',
 +    addToSessionDone: title => `已添加到“${title}” — 打开该会话即可查看并发送。`,
-+    recallFailed: '无法加载该记忆以供插入。',
-+    // 多档案模式 (机器人记忆整合)
-+    profileSelector: '选择机器人',
-+    profileSelectorHint: '勾选要在此图谱中显示其记忆和技能的机器人。',
-+    profileAll: '全部机器人',
-+    profileNone: '未选择机器人',
-+    profileCount: n => `已选择 ${n} 个机器人`,
-+    profileBadge: name => name,
-+    insertIntoProfile: name => `插入到 ${name}`,
-+    insertIntoAllSelected: '插入到所有已选机器人',
-+    insertIntoProfileDone: name => `已插入到 ${name} 的记忆中。`,
-+    insertIntoAllDone: n => `已插入到 ${n} 个机器人。`,
-+    crossProfileInsertFailed: '无法插入到该机器人的记忆中。'
-   },
-   agents: {
-     extendedTranscript: '扩展记录',
++    recallFailed: '无法加载该记忆以供插入。'
 diff --git a/apps/desktop/src/lib/desktop-slash-commands.test.ts b/apps/desktop/src/lib/desktop-slash-commands.test.ts
-index 43726561eb18e9ba2e0fa49a09a6e736f87b8322..80ee40ce39084e396801392b26557af6f0060043 100644
+index d8620a985b195d01bc2d297914000951f556b4b7..de0009870ed7064ab6efb1e7a2a18a6d801583e4 100644
 --- a/apps/desktop/src/lib/desktop-slash-commands.test.ts
 +++ b/apps/desktop/src/lib/desktop-slash-commands.test.ts
-@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
- import {
-   type CommandCatalogMeta,
-   type CommandsCatalogLike,
+@@ -5,0 +6 @@ import {
 +  desktopBuiltinSlashCompletions,
-   desktopSkinSlashCompletions,
-   type DesktopSlashArgumentMode,
-   desktopSlashCommandArgumentMode,
-@@ -294,6 +295,39 @@ describe('desktop slash command curation', () => {
-     expect(desktopSlashUnavailableMessage('/journey')).toBeNull()
-   })
- 
+@@ -146,0 +148,88 @@ describe('desktop slash command curation', () => {
++  it('keeps commands with richer CLI semantics on the slash worker', () => {
++    for (const name of ['/agents', '/steer', '/usage']) {
++      expect(resolveDesktopCommand(name)?.surface).toEqual({ kind: 'exec' })
++    }
++  })
++
++  it('still routes commands without dedicated RPCs through exec()', () => {
++    // /btw is an action (prompt.btw) — the slash-worker print never reached Desktop.
++    const execNames = [
++      '/bg',
++      '/debug',
++      '/goal',
++      '/personality',
++      '/queue',
++      '/retry',
++      '/rollback',
++      '/tools',
++      '/undo',
++      '/version'
++    ]
++
++    for (const name of execNames) {
++      expect(resolveDesktopCommand(name)?.surface).toEqual({ kind: 'exec' })
++    }
++  })
++
++  it('routes /btw to the prompt.btw side-question action', () => {
++    expect(resolveDesktopCommand('/btw')?.surface).toEqual({ kind: 'action', action: 'btw' })
++    expect(isDesktopSlashCommand('/btw')).toBe(true)
++    expect(isDesktopSlashSuggestion('/btw')).toBe(true)
++    expect(desktopSlashUnavailableMessage('/btw')).toBeNull()
++  })
++
++  it('distinguishes free prose from finite slash option lists', () => {
++    expect(desktopSlashCommandArgumentMode('/goal')).toBe('mixed')
++    expect(desktopSlashCommandArgumentMode('/steer')).toBe('text')
++    expect(desktopSlashCommandArgumentMode('/queue')).toBe('text')
++    expect(desktopSlashCommandArgumentMode('/personality')).toBe('options')
++    expect(desktopSlashCommandArgumentMode('/handoff')).toBe('options')
++    expect(desktopSlashCommandArgumentMode('/version')).toBeNull()
++  })
++
++  it('routes /journey (and aliases) to the memory graph overlay action', () => {
++    expect(resolveDesktopCommand('/journey')?.surface).toEqual({ kind: 'action', action: 'journey' })
++    expect(resolveDesktopCommand('/memory-graph')?.surface).toEqual({ kind: 'action', action: 'journey' })
++    expect(resolveDesktopCommand('/learning')?.surface).toEqual({ kind: 'action', action: 'journey' })
++    expect(isDesktopSlashCommand('/journey')).toBe(true)
++    expect(isDesktopSlashCommand('/memory-graph')).toBe(true)
++    expect(isDesktopSlashSuggestion('/journey')).toBe(true)
++    // Aliases execute but stay out of the popover.
++    expect(isDesktopSlashSuggestion('/memory-graph')).toBe(false)
++    expect(desktopSlashUnavailableMessage('/journey')).toBeNull()
++  })
++
 +  it('routes /recall to the memory graph recall action and surfaces it', () => {
 +    // /recall is DESKTOP-ONLY (no backend twin), so it must be both executable
 +    // and discoverable purely from the local table — the backend completion
@@ -4367,49 +3606,32 @@ index 43726561eb18e9ba2e0fa49a09a6e736f87b8322..80ee40ce39084e396801392b26557af6
 +    expect(recall).toBeDefined()
 +    expect(recall?.meta).toContain('Search the memory graph')
 +
-+    // Prefix match, canonical names only.
-+    expect(desktopBuiltinSlashCompletions('/rec').map(item => item.text)).toContain('/recall')
-+    expect(desktopBuiltinSlashCompletions('/journey').map(item => item.text)).toEqual(['/journey'])
++    // Prefix match, canonical local-only names only. Registry-backed twins stay
++    // owned by the backend's relevance list.
++    expect(desktopBuiltinSlashCompletions('/rec').map(item => item.text)).toEqual(['/recall'])
++    expect(desktopBuiltinSlashCompletions('/journey')).toEqual([])
 +
-+    // Excludes hidden (picker chrome), unavailable, and alias entries.
++    // Excludes hidden, unavailable, aliases, and registry-backed commands.
 +    const names = new Set(all.map(item => item.text))
 +    expect(names.has('/model')).toBe(false) // hidden
 +    expect(names.has('/clear')).toBe(false) // unavailable (terminal-only)
 +    expect(names.has('/memory-graph')).toBe(false) // alias of /journey
-+    expect(names.has('/journey')).toBe(true)
++    expect(names.has('/journey')).toBe(false) // supplied by the backend registry
 +  })
 +
-   it('allows aliases to execute without cluttering the popover', () => {
-     expect(isDesktopSlashSuggestion('/reset')).toBe(false)
-     expect(isDesktopSlashCommand('/reset')).toBe(true)
 diff --git a/apps/desktop/src/lib/desktop-slash-commands.ts b/apps/desktop/src/lib/desktop-slash-commands.ts
-index f1decc521d1ea6fe5505072d0cc145009eac311a..c519b5a01b5a5c8dd10da5e0b9ff4724dd48b1d0 100644
+index f9528821066b709d4f02d4b7faa5b73640d38d5b..f082e817e937eb7d1b77ba553797e7bc7f8376b8 100644
 --- a/apps/desktop/src/lib/desktop-slash-commands.ts
 +++ b/apps/desktop/src/lib/desktop-slash-commands.ts
-@@ -66,6 +66,7 @@ export type DesktopActionId =
-   | 'new'
-   | 'pet'
-   | 'profile'
+@@ -70,0 +71 @@ export type DesktopActionId =
 +  | 'recall'
-   | 'skin'
-   | 'stop'
-   | 'title'
-@@ -221,6 +222,11 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
-     aliases: ['/learning', '/memory-graph'],
-     surface: action('journey')
-   },
+@@ -231,0 +233,5 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
 +  {
 +    name: '/recall',
 +    description: 'Search the memory graph and insert a memory, skill, or conclusion into this chat',
 +    surface: action('recall')
 +  },
- 
-   // Overlay pickers
-   { name: '/model', description: 'Switch the model for this session', surface: picker('model'), hidden: true },
-@@ -580,6 +586,39 @@ export function desktopSlashCommandArgumentMode(command: string): DesktopSlashAr
-   return resolveDesktopCommand(command)?.argumentMode ?? asArgumentMode(catalogMeta(command)?.argument_mode) ?? null
- }
- 
+@@ -633,0 +640,42 @@ export function desktopSlashCommandArgumentMode(command: string): DesktopSlashAr
 +/**
 + * Suggestible desktop BUILT-IN command completions matching `query` as a name
 + * prefix (empty query = all of them).
@@ -4431,6 +3653,15 @@ index f1decc521d1ea6fe5505072d0cc145009eac311a..c519b5a01b5a5c8dd10da5e0b9ff4724
 +  const needle = normalizeCommand(query).slice(1)
 +
 +  return DESKTOP_COMMAND_SPECS.filter(spec => {
++    // Registry-backed commands are already supplied by commands.catalog /
++    // complete.slash. Seeding them here would override the backend's relevance
++    // list (for example, `/re` would gain /reasoning and /resume even when the
++    // backend intentionally returned only /refine). Only local-only rows such
++    // as /recall need a desktop seed.
++    if (Object.hasOwn(REGISTRY_DESKTOP_SURFACE, spec.name)) {
++      return false
++    }
++
 +    if (spec.hidden || spec.surface.kind === 'unavailable') {
 +      return false
 +    }
@@ -4443,112 +3674,28 @@ index f1decc521d1ea6fe5505072d0cc145009eac311a..c519b5a01b5a5c8dd10da5e0b9ff4724
 +  }))
 +}
 +
- export function desktopSkinSlashCompletions(
-   themes: DesktopThemeCommandOption[],
-   activeThemeName: string,
 diff --git a/apps/desktop/src/lib/loadout.ts b/apps/desktop/src/lib/loadout.ts
 index b687690c45a99b56b045663d9f965e9e9b45e5e1..14ae8d8bf9e7549695a09a97e15fd8b44d4b8fdc 100644
 --- a/apps/desktop/src/lib/loadout.ts
 +++ b/apps/desktop/src/lib/loadout.ts
-@@ -199,6 +199,10 @@ export interface LoadoutSpec<T> {
-   write: (w: BitWriter, value: T) => void
-   /** Read the domain body back. May throw — it's wrapped as a LoadoutError. */
-   read: (r: BitReader) => T
+@@ -201,0 +202,4 @@ export interface LoadoutSpec<T> {
 +  /** Optional readers for OLDER body-schema versions this build still accepts,
 +   *  keyed by version byte. Lets a codec bump `version` for new fields while
 +   *  previously shared codes keep decoding. */
 +  legacyReads?: Record<number, (r: BitReader) => T>
-   /** Noun for user-facing error messages, e.g. 'map code'. Default: 'code'. */
-   noun?: string
-   /** Error subclass to throw, so callers can `instanceof` their own type. */
-@@ -258,7 +262,9 @@ export function createLoadout<T>(spec: LoadoutSpec<T>): Loadout<T> {
-     const version = head.uint(8)
-     const storedSum = head.uint(16)
- 
+@@ -261 +265,3 @@ export function createLoadout<T>(spec: LoadoutSpec<T>): Loadout<T> {
 -    if (version !== spec.version) {
 +    const read = version === spec.version ? spec.read : spec.legacyReads?.[version]
 +
 +    if (!read) {
-       throw new Err(`${Noun} is version ${version}; this build reads version ${spec.version}.`)
-     }
- 
-@@ -269,7 +275,7 @@ export function createLoadout<T>(spec: LoadoutSpec<T>): Loadout<T> {
-     }
- 
-     try {
+@@ -272 +278 @@ export function createLoadout<T>(spec: LoadoutSpec<T>): Loadout<T> {
 -      return spec.read(new BitReader(inflateSync(payload)))
 +      return read(new BitReader(inflateSync(payload)))
-     } catch (err) {
-       throw new Err(err instanceof Error ? `${Noun} is malformed: ${err.message}` : `${Noun} is malformed.`)
-     }
 diff --git a/apps/desktop/src/store/starmap.ts b/apps/desktop/src/store/starmap.ts
-index b43a52bad9b0b13e91ebe75e87ab2090c9041348..991a4a090067d4580276d9ac11598ad0ed5ebd00 100644
+index b43a52bad9b0b13e91ebe75e87ab2090c9041348..76fff8ab6ddcb5cfe9ddc8610d1fe1d43a50c426 100644
 --- a/apps/desktop/src/store/starmap.ts
 +++ b/apps/desktop/src/store/starmap.ts
-@@ -1,6 +1,7 @@
- import { atom } from 'nanostores'
- 
--import { getStarmapGraph } from '@/hermes'
-+import { getStarmapGraph, getStarmapGraphMultiProfile } from '@/hermes'
-+import { persistStringArray, storedStringArray } from '@/lib/storage'
- import type { StarmapGraph } from '@/types/hermes'
- 
- // On-demand cache for the star map. The graph scan touches the skills catalog +
-@@ -10,6 +11,32 @@ export const $starmapGraph = atom<StarmapGraph | null>(null)
- export const $starmapLoading = atom(false)
- export const $starmapError = atom<null | string>(null)
- 
-+// ── Multi-profile selection ─────────────────────────────────────────────────
-+// Persisted list of profile names to include in the journey map. An empty list
-+// means "current profile only" (single-profile mode, backwards compatible).
-+// The first profile in the list is considered the "primary" (checked by default
-+// on first load).
-+const SELECTED_PROFILES_STORAGE_KEY = 'hermes.desktop.starmap.selectedProfiles'
-+
-+export const $starmapSelectedProfiles = atom<string[]>(storedStringArray(SELECTED_PROFILES_STORAGE_KEY))
-+
-+// Persist on change
-+$starmapSelectedProfiles.subscribe(value => persistStringArray(SELECTED_PROFILES_STORAGE_KEY, [...value]))
-+
-+export function setStarmapSelectedProfiles(profiles: string[]): void {
-+  $starmapSelectedProfiles.set(profiles)
-+}
-+
-+export function toggleStarmapProfile(profile: string, enabled: boolean): void {
-+  const current = $starmapSelectedProfiles.get()
-+
-+  const next = enabled
-+    ? [...new Set([...current, profile])]
-+    : current.filter(p => p !== profile)
-+
-+  $starmapSelectedProfiles.set(next)
-+}
-+
- let inflight: Promise<void> | null = null
- 
- export async function loadStarmapGraph(force = false): Promise<void> {
-@@ -26,7 +53,16 @@ export async function loadStarmapGraph(force = false): Promise<void> {
- 
-   inflight = (async () => {
-     try {
--      $starmapGraph.set(await getStarmapGraph())
-+      const selectedProfiles = $starmapSelectedProfiles.get()
-+
-+      // Multi-profile mode: fetch merged graph when multiple profiles selected
-+      if (selectedProfiles.length > 1) {
-+        $starmapGraph.set(await getStarmapGraphMultiProfile(selectedProfiles))
-+      } else {
-+        // Single-profile mode (or empty = current profile)
-+        const profile = selectedProfiles.length === 1 ? selectedProfiles[0] : undefined
-+        $starmapGraph.set(await getStarmapGraph(profile))
-+      }
-     } catch (err) {
-       $starmapError.set(err instanceof Error ? err.message : String(err))
-     } finally {
-@@ -63,3 +99,21 @@ export function resetStarmapGraph(): void {
-   $starmapGraph.set(null)
-   $starmapError.set(null)
- }
+@@ -65,0 +66,18 @@ export function resetStarmapGraph(): void {
 +
 +// ── /recall mode ────────────────────────────────────────────────────────────
 +//
@@ -4568,13 +3715,10 @@ index b43a52bad9b0b13e91ebe75e87ab2090c9041348..991a4a090067d4580276d9ac11598ad0
 +  $starmapRecallMode.set(false)
 +}
 diff --git a/apps/desktop/src/types/hermes.ts b/apps/desktop/src/types/hermes.ts
-index 03007c4226f0aa02ded5749528d662c254c78e0b..32d07cbbf827b741a644723c45c634862fd0011d 100644
+index 43b4fb19e1fd6dc399a69ba1f7c2ca6ef1a746e4..30bd63da817bcfdbbb1ec230a9e8ceb0cc9de095 100644
 --- a/apps/desktop/src/types/hermes.ts
 +++ b/apps/desktop/src/types/hermes.ts
-@@ -742,19 +742,45 @@ export interface StarmapNode {
-   id: string
-   label: string
-   kind: 'memory' | 'skill'
+@@ -816 +816,14 @@ export interface StarmapNode {
 -  memorySource?: 'memory' | 'profile'
 +  /** 'memory' (MEMORY.md) | 'profile' (USER.md) | a memory-provider name
 +   *  ('honcho', …) for nodes contributed by an external provider's
@@ -4590,349 +3734,56 @@ index 03007c4226f0aa02ded5749528d662c254c78e0b..32d07cbbf827b741a644723c45c63486
 +   *  conversation / file memory / skill) or an import source ('chatgpt', …).
 +   *  Backend stamps provider nodes; absent (older backend) means 'hermes'. */
 +  origin?: string
-   timestamp?: null | number
-   category: string
-   useCount: number
-   state: string
-   createdBy: null | string
-   pinned: boolean
+@@ -822,0 +836,5 @@ export interface StarmapNode {
 +  /** Provider-side session this entry was derived from (e.g. a Honcho
 +   *  conclusion's session). For Hermes-born sessions this doubles as the
 +   *  Hermes session id; for imported history it only resolves in the
 +   *  provider backend. Absent on skills and file-based memory chunks. */
 +  sessionId?: string
-+  /** Multi-profile mode: which profile this node belongs to. Absent in
-+   *  single-profile mode (backwards compatible). */
-+  profile?: string
-+  /** Multi-profile mode: the original node id without the profile prefix,
-+   *  used for mutations/edits. */
-+  _originalId?: string
- }
- 
- /** A declared `related_skills` link; both endpoints are guaranteed to be nodes. */
- export interface StarmapEdge {
-   source: string
-   target: string
-+  /** Multi-profile mode: which profile this edge belongs to. */
-+  profile?: string
- }
- 
- export interface StarmapCluster {
-@@ -764,10 +790,13 @@ export interface StarmapCluster {
- 
- /** Freeform memory rendered as a card — never a graph node. */
- export interface StarmapMemoryCard {
+@@ -838 +856,2 @@ export interface StarmapMemoryCard {
 -  source: 'memory' | 'profile'
 +  /** 'memory' | 'profile' | a memory-provider name (see StarmapNode.memorySource). */
 +  source: string
-   timestamp?: null | number
-   title: string
-   body: string
-+  /** Multi-profile mode: which profile this card belongs to. */
-+  profile?: string
- }
- 
- export interface StarmapGraph {
-@@ -776,6 +805,15 @@ export interface StarmapGraph {
-   clusters: StarmapCluster[]
-   memory: StarmapMemoryCard[]
-   stats: Record<string, unknown>
+@@ -852,0 +872,5 @@ export interface StarmapGraph {
 +  /** Active external memory provider ('honcho', …) or null/absent (file-based
 +   *  memory only). Gates provider-specific journey UI — notably the conclusion
 +   *  node kind, which is only meaningful when Honcho is the active provider.
 +   *  Absent from an un-upgraded backend, so treat missing as null. */
 +  memoryProvider?: null | string
-+  /** Multi-profile mode: true when the graph merges multiple profiles. */
-+  multiProfile?: boolean
-+  /** Multi-profile mode: the list of profiles included in this graph. */
-+  profiles?: string[]
- }
- 
- export interface ContextUsageCategory {
 diff --git a/hermes_cli/web_models.py b/hermes_cli/web_models.py
-index 729b44add2967a9dd9e4f3c1ac12888ae14691f4..edb61de1dd1c3677b0630076cbcfb7f6402ef018 100644
+index 33747afa7c29b517331ff7cf26c9cc6744677793..9650ac08ed04302b49315147267f85f0bb0eac42 100644
 --- a/hermes_cli/web_models.py
 +++ b/hermes_cli/web_models.py
-@@ -207,6 +207,17 @@ class LearningNodeRef(BaseModel):
-     id: str
-     profile: Optional[str] = None
- 
-+class LearningNodeCrossInsert(BaseModel):
-+    id: str
-+    source_profile: str
-+    target_profile: str
-+
+@@ -220,0 +221,6 @@ class LearningNodeRef(BaseModel):
 +
 +class ProviderSessionMaterialize(BaseModel):
 +    session_id: str
 +    profile: Optional[str] = None
 +
 +
- class LearningNodeEdit(BaseModel):
-     id: str
-     content: str
 diff --git a/hermes_cli/web_routers/status.py b/hermes_cli/web_routers/status.py
-index d4d8b0b6522773e4f75bc7b77c82616f4abed47b..bd4411e944387d7720406daaa8ef235ef07ccb7e 100644
+index e191bee5162efb2b34b12c49e69b997197082928..6bd38f0a216141de9222f1d8c27ab4ddc3b5f40b 100644
 --- a/hermes_cli/web_routers/status.py
 +++ b/hermes_cli/web_routers/status.py
-@@ -24,7 +24,14 @@ from gateway.status import (
- from hermes_cli import __version__, __release_date__
- from hermes_cli.config import get_config_path, get_env_path
- from hermes_constants import get_process_hermes_home, profile_name_for_home
+@@ -29 +29,3 @@ from hermes_constants import get_process_hermes_home, profile_name_for_home
 -from hermes_cli.web_models import CuratorPause, LearningNodeRef, LearningNodeEdit, DebugShareRequest
 +from hermes_cli.web_models import (
-+    CuratorPause,
-+    DebugShareRequest,
-+    LearningNodeCrossInsert,
-+    LearningNodeEdit,
-+    LearningNodeRef,
-+    ProviderSessionMaterialize,
-+)
- from hermes_cli.web_routers._common import scoped_to_thread
- from pathlib import Path
- from typing import Any, Dict, Optional
-@@ -580,9 +587,118 @@ async def run_curator():
-     return _spawn_action(["curator", "run"], "curator-run", "Failed to run curator")
- 
- 
-+async def _get_multi_profile_learning_graph(profile_names: list[str]):
-+    """Build a merged learning graph from multiple profiles.
-+
-+    Each node/edge/memory card is tagged with its source profile, and ids are
-+    prefixed to avoid collisions. The first profile in the list is considered
-+    the "primary" profile.
-+    """
-+    from agent.learning_graph import build_learning_graph
-+    from hermes_cli.web_routers._common import _profile_scope
-+
-+    def _build_for_profile(profile_name: str):
-+        with _profile_scope(profile_name):
-+            return build_learning_graph()
-+
-+    merged_nodes = []
-+    merged_edges = []
-+    merged_clusters: Dict[str, int] = {}
-+    merged_memory = []
-+    merged_stats = {
-+        "profiles": [], "nodes": 0, "related_edges": 0, "memory_nodes": 0, "learned_skills": 0,
-+    }
-+
-+    try:
-+        # Track which memory providers are in use across profiles
-+        memory_providers = set()
-+
-+        for profile_name in profile_names:
-+            try:
-+                graph = await asyncio.to_thread(lambda pn=profile_name: _build_for_profile(pn))
-+            except HTTPException:
-+                # Profile doesn't exist or inaccessible — skip it
-+                continue
-+            except Exception:
-+                _log.warning(f"Failed to build graph for profile '{profile_name}', skipping")
-+                continue
-+
-+            merged_stats["profiles"].append(profile_name)
-+
-+            # Track memory provider (for conclusion support)
-+            provider = graph.get("memoryProvider")
-+            if provider:
-+                memory_providers.add(provider)
-+
-+            # Prefix node ids with profile name for disambiguation
-+            id_prefix = f"{profile_name}:"
-+
-+            for node in graph.get("nodes", []):
-+                merged_nodes.append({
-+                    **node, "id": f"{id_prefix}{node['id']}", "profile": profile_name,
-+                    "_originalId": node["id"],  # Keep original for mutations
-+                })
-+
-+            for edge in graph.get("edges", []):
-+                merged_edges.append({
-+                    "source": f"{id_prefix}{edge['source']}",
-+                    "target": f"{id_prefix}{edge['target']}",
-+                    "profile": profile_name,
-+                })
-+
-+            for cluster in graph.get("clusters", []):
-+                cat = cluster["category"]
-+                merged_clusters[cat] = merged_clusters.get(cat, 0) + cluster["count"]
-+
-+            for card in graph.get("memory", []):
-+                merged_memory.append({**card, "profile": profile_name})
-+
-+            stats = graph.get("stats", {})
-+            merged_stats["nodes"] += stats.get("nodes", 0)
-+            merged_stats["related_edges"] += stats.get("related_edges", 0)
-+            merged_stats["memory_nodes"] += stats.get("memory_nodes", 0)
-+            merged_stats["learned_skills"] += stats.get("learned_skills", 0)
-+
-+        # If any profile uses honcho, expose it so conclusions are visible
-+        merged_provider = None
-+        if "honcho" in memory_providers:
-+            merged_provider = "honcho"
-+        elif memory_providers:
-+            merged_provider = next(iter(memory_providers))
-+
-+        return {
-+            "nodes": merged_nodes,
-+            "edges": merged_edges,
-+            "clusters": [
-+                {"category": c, "count": n}
-+                for c, n in sorted(merged_clusters.items(), key=lambda kv: -kv[1])
-+            ],
-+            "memory": merged_memory,
-+            "memoryProvider": merged_provider,
-+            "stats": merged_stats,
-+            "multiProfile": True,  # Flag for the frontend
-+            "profiles": merged_stats["profiles"],
-+        }
-+    except Exception:
-+        _log.exception("GET /api/learning/graph (multi-profile) failed")
-+        raise HTTPException(status_code=500, detail="Failed to build multi-profile learning graph")
-+
-+
- @router.get("/api/learning/graph")
--async def get_learning_graph(profile: Optional[str] = None):
--    """Learning graph for the desktop panel: profile-scoped learned skills + memory chunks."""
-+async def get_learning_graph(profile: Optional[str] = None, profiles: Optional[str] = None):
-+    """Learning graph for the desktop panel: profile-scoped learned skills + memory chunks.
-+
-+    Multi-profile mode: pass `profiles` as a comma-separated list of profile names to
-+    merge graphs from multiple profiles. Each node gains a `profile` field indicating
-+    which profile it came from; node ids are prefixed with `<profile>:`.
-+    """
-+    # Multi-profile mode: merge graphs from multiple profiles
-+    if profiles:
-+        profile_list = [p.strip() for p in profiles.split(",") if p.strip()]
-+        if profile_list:
-+            return await _get_multi_profile_learning_graph(profile_list)
-+
-+    # Single-profile mode (original behavior)
-     def _run():
-         from agent.learning_graph import build_learning_graph
-         return build_learning_graph()
-@@ -628,6 +744,205 @@ async def update_learning_node(body: LearningNodeEdit):
-         body.profile, lambda: edit_node(body.id, body.content), 400, "edit failed")
- 
- 
-+# ── Journey / star-map extensions ──────────────────────────────────────────
-+
-+
-+@router.post("/api/learning/node/cross-insert")
-+async def cross_insert_learning_node(body: LearningNodeCrossInsert):
-+    """Copy a learning node's content from one profile into another profile's
-+    memory. Only memory nodes can be cross-inserted; skills are not supported
-+    (they have complex directory structures).
-+
-+    For Honcho conclusions (memory:honcho:<id>), we fetch the conclusion text
-+    from Honcho and insert it into the target profile's MEMORY.md.
-+    """
-+    from agent.learning_mutations import node_detail
-+    from hermes_cli.web_routers._common import _profile_scope
-+
-+    def _run():
-+        node_id = body.id
-+        content = None
-+
-+        # Check if this is a Honcho conclusion (memory:honcho:<index>)
-+        if node_id.startswith("memory:honcho:"):
-+            # Fetch from Honcho provider
-+            with _profile_scope(body.source_profile):
-+                try:
-+                    from agent.learning_graph import _provider_memory_cards
-+
-+                    try:
-+                        idx = int(node_id.split(":")[-1])
-+                    except ValueError:
-+                        return {"ok": False, "message": f"Invalid Honcho node id: {node_id}"}
-+
-+                    cards = _provider_memory_cards()
-+                    if not cards or idx >= len(cards):
-+                        return {"ok": False, "message": f"Honcho conclusion not found (index {idx})"}
-+
-+                    card = cards[idx]
-+                    content = card.get("body", "").strip()
-+                    if not content:
-+                        content = card.get("title", "").strip()
-+                    if not content:
-+                        return {"ok": False, "message": "Conclusion has no content to insert"}
-+
-+                except Exception as e:
-+                    _log.exception("Failed to fetch Honcho conclusion")
-+                    return {"ok": False, "message": f"Failed to fetch Honcho conclusion: {e}"}
-+        else:
-+            # Standard file-based memory
-+            with _profile_scope(body.source_profile):
-+                detail = node_detail(node_id)
-+                if not detail.get("ok"):
-+                    return {"ok": False, "message": f"Node not found in {body.source_profile}"}
-+
-+                content = detail.get("content", "").strip()
-+                if not content:
-+                    return {"ok": False, "message": "Node has no content to insert"}
-+                if detail.get("kind") == "skill":
-+                    return {"ok": False, "message": "Cross-profile skill insertion is not supported"}
-+
-+        # Now insert into the target profile's memory
-+        with _profile_scope(body.target_profile):
-+            from hermes_constants import get_hermes_home
-+
-+            memory_path = get_hermes_home() / "memories" / "MEMORY.md"
-+            memory_path.parent.mkdir(parents=True, exist_ok=True)
-+
-+            existing = ""
-+            if memory_path.exists():
-+                existing = memory_path.read_text(encoding="utf-8")
-+
-+            separator = "\n§\n" if existing.strip() else ""
-+            provenance_note = f"[Imported from profile: {body.source_profile}]"
-+            new_content = f"{existing.rstrip()}{separator}{provenance_note}\n{content}\n"
-+            memory_path.write_text(new_content, encoding="utf-8")
-+
-+            return {"ok": True, "message": f"Inserted into {body.target_profile}"}
-+
-+    try:
-+        return await asyncio.to_thread(_run)
-+    except Exception as e:
-+        _log.exception("POST /api/learning/node/cross-insert failed")
-+        raise HTTPException(status_code=500, detail=str(e))
-+
-+
++    CuratorPause, DebugShareRequest, LearningNodeEdit, LearningNodeRef,
++    ProviderSessionMaterialize)
+@@ -716,0 +719,100 @@ async def update_learning_node(body: LearningNodeEdit):
 +@router.get("/api/learning/recall-draft")
 +async def get_learning_recall_draft(id: str, profile: Optional[str] = None):
-+    """Safe, provenance-tagged draft text for recalling a journey node's
-+    knowledge into a session as reference context ("Add to recent session" /
-+    "/recall").
-+
-+    The recalled body is treated as UNTRUSTED (defends against a tampered
-+    memory database): it is scanned with the shared threat detector, its
-+    delimiter is defanged, and it is wrapped in an ``untrusted_memory_recall``
-+    block telling the model to treat the contents as data, not instructions.
-+    """
++    """Return injection-hardened draft text for recalling a journey node."""
 +    from agent.learning_mutations import build_recall_draft
-+
-+    def _run():
-+        return build_recall_draft(id)
-+
-+    res = await scoped_to_thread(profile, _run)
-+    if not res.get("ok"):
-+        raise HTTPException(status_code=404, detail=res.get("message", "not found"))
-+    return res
++    return await _learning_mutation(
++        profile, lambda: build_recall_draft(id), 404, "not found")
 +
 +
 +@router.get("/api/learning/provider-session")
 +async def get_learning_provider_session(
 +    session_id: str, limit: int = 500, profile: Optional[str] = None
 +):
-+    """Source corpus behind a provider-contributed journey node.
-+
-+    Proxies the active memory provider's ``journey_session_messages`` hook —
-+    the raw provider-side conversation a derived fact (e.g. a Honcho
-+    conclusion) came from. Best-effort by the hook's contract: no provider,
-+    unknown session, or backend down → empty message list, not an error.
-+    """
-+
++    """Return the provider-side source corpus behind a journey node."""
 +    def _read():
 +        from plugins.memory import _get_active_memory_provider, load_memory_provider
 +
@@ -4947,16 +3798,20 @@ index d4d8b0b6522773e4f75bc7b77c82616f4abed47b..bd4411e944387d7720406daaa8ef235e
 +        from agent.learning_graph import _to_int_ts
 +
 +        messages = []
-+        for m in raw:
-+            if not isinstance(m, dict):
++        for message in raw:
++            if not isinstance(message, dict):
 +                continue
-+            content = str(m.get("content") or "")
++            content = str(message.get("content") or "")
 +            if not content.strip():
 +                continue
 +            messages.append({
 +                "content": content,
-+                "peer": str(m.get("peer") or ""),
-+                "timestamp": _to_int_ts(m.get("timestamp")),
++                "peer": str(message.get("peer") or ""),
++                "timestamp": _to_int_ts(message.get("timestamp")),
++                # role is part of the ProviderSessionMessage contract
++                # (desktop type: "'user' | 'assistant' when the provider
++                # knows which peer is the human") — pass it through.
++                **({"role": message["role"]} if message.get("role") else {}),
 +            })
 +        return name, messages
 +
@@ -4970,43 +3825,44 @@ index d4d8b0b6522773e4f75bc7b77c82616f4abed47b..bd4411e944387d7720406daaa8ef235e
 +
 +@router.post("/api/learning/provider-session/materialize")
 +async def materialize_learning_provider_session(body: ProviderSessionMaterialize):
-+    """Recreate a provider-side conversation as a real Hermes session.
-+
-+    Journey drill-down action: the source corpus behind a provider node
-+    (e.g. imported ChatGPT history in Honcho, or a Hermes conversation whose
-+    row was deleted but whose sync copy survives in the provider) is shaped
-+    by ``build_provider_session_import`` and written through the standard
-+    session-import path. Import skips existing ids, so this is idempotent:
-+    recreating an already-materialized conversation just returns its id with
-+    ``created: false`` and the UI opens the existing session.
-+    """
++    """Recreate a provider-side conversation through the standard session importer."""
++    profile = destructive_profile(
++        body.profile, "POST /api/learning/provider-session/materialize")
 +
 +    def _materialize():
-+        from agent.learning_mutations import build_provider_session_import
-+        from hermes_cli.web_routers.sessions import _with_db
-+        from hermes_cli.web_routers._common import _profile_scope
++        learning_mutations = importlib.import_module("agent.learning_mutations")
 +
-+        with _profile_scope(body.profile):
-+            built = build_provider_session_import(body.session_id)
-+            if not built.get("ok"):
-+                return built
-+            result = _with_db(
-+                body.profile, lambda db: db.import_sessions([built["session"]]), read_only=False)
-+
++        built = learning_mutations.build_provider_session_import(body.session_id)
++        if not built.get("ok"):
++            return built
++        provider = str(built.get("provider") or "").strip()
++        if not provider:
++            return {"ok": False, "message": "provider session is missing provenance"}
++        session = {**built["session"], "source": f"journey:{provider}"}
++        db = _open_session_db_for_profile(profile, read_only=False)
++        try:
++            result = db.import_sessions([session])
++        finally:
++            db.close()
 +        errors = result.get("errors") or []
 +        if errors:
-+            return {"ok": False, "message": str(errors[0].get("error", "import failed"))}
++            first_error = errors[0]
++            message = (
++                first_error.get("error", "import failed")
++                if isinstance(first_error, dict) else str(first_error)
++            )
++            return {"ok": False, "message": str(message)}
 +        return {
 +            "ok": True,
-+            "provider": built.get("provider"),
-+            "session_id": built["session"]["id"],
-+            "title": built["session"].get("title") or "",
++            "provider": provider,
++            "session_id": session["id"],
++            "title": session.get("title") or "",
 +            "message_count": built.get("message_count", 0),
 +            "created": bool(result.get("imported")),
 +        }
 +
 +    try:
-+        res = await asyncio.to_thread(_materialize)
++        res = await scoped_to_thread(profile, _materialize)
 +    except Exception:
 +        _log.exception("POST /api/learning/provider-session/materialize failed")
 +        raise HTTPException(status_code=500, detail="Failed to materialize provider session")
@@ -5015,17 +3871,11 @@ index d4d8b0b6522773e4f75bc7b77c82616f4abed47b..bd4411e944387d7720406daaa8ef235e
 +    return res
 +
 +
- # Portal — Nous Portal auth + Tool Gateway routing status (read-only).
- 
- 
 diff --git a/plugins/memory/honcho/__init__.py b/plugins/memory/honcho/__init__.py
-index 0b966be1c7d31e03fd9d7f5ad7b53b179345632b..8e8024dcaabf88791d5033a443d0c361bf2be082 100644
+index 14255ce5a1143e1a78c4b3c6e28c48c3512f8871..10191842558222418147e8a40938f0a3dc52e5b1 100644
 --- a/plugins/memory/honcho/__init__.py
 +++ b/plugins/memory/honcho/__init__.py
-@@ -120,6 +120,141 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
-         except Exception:
-             return []
- 
+@@ -122,0 +123,135 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
 +    def journey_cards(self, limit: int = 10000) -> List[Dict[str, Any]]:
 +        """Conclusions about the user peer, for the learning-journey graph.
 +
@@ -5161,22 +4011,17 @@ index 0b966be1c7d31e03fd9d7f5ad7b53b179345632b..8e8024dcaabf88791d5033a443d0c361
 +        except Exception:
 +            return []
 +
-     def __init__(self, query_rewriter: Optional[Callable[[str], str]] = None):
-         self._manager = None   # HonchoSessionManager
-         self._config = None    # HonchoClientConfig
 diff --git a/tests/agent/test_learning_graph.py b/tests/agent/test_learning_graph.py
-index 3049273735db3628a37f2fedbee941a3956f698f..616e2bfd7139ad002b203de321a073073e16ddd4 100644
+index 14ea7efceb191ce5d8b36b221896742ac0767e08..533e5dd76bb22d519b340218f550aa6fe6f37355 100644
 --- a/tests/agent/test_learning_graph.py
 +++ b/tests/agent/test_learning_graph.py
-@@ -79,3 +79,238 @@ def test_full_payload_shape_and_edge_integrity(tmp_path):
-     assert graph["stats"]["nodes"] == len(skill_nodes)
-     assert graph["stats"]["memory_nodes"] == len(graph["memory"])
-     assert all("timestamp" in n for n in graph["nodes"])
+@@ -81,0 +82,5 @@ def test_full_payload_shape_and_edge_integrity(tmp_path):
 +    # Provider gate: the payload always carries memoryProvider (None here — no
 +    # active external provider in the temp home) so the desktop never has to
 +    # infer the provider from node presence.
 +    assert "memoryProvider" in graph
 +    assert graph["memoryProvider"] is None
+@@ -102,0 +108,230 @@ def test_foreground_created_skill_is_in_journey_before_first_use(tmp_path):
 +
 +
 +def test_memory_provider_name_reflects_active_provider(monkeypatch, tmp_path):
@@ -5260,8 +4105,8 @@ index 3049273735db3628a37f2fedbee941a3956f698f..616e2bfd7139ad002b203de321a07307
 +        "honcho",
 +        _FakeProvider(
 +            [
-+                {"body": "toby texts himself instructions", "level": "explicit"},
-+                {"body": "toby values reproducibility", "level": "INDUCTIVE"},
++                {"body": "user keeps a written journal", "level": "explicit"},
++                {"body": "user values reproducibility", "level": "INDUCTIVE"},
 +                {"body": "a fact from an older backend"},  # no level
 +            ]
 +        ),
@@ -5408,13 +4253,10 @@ index 3049273735db3628a37f2fedbee941a3956f698f..616e2bfd7139ad002b203de321a07307
 +    assert by_body["hermes fact"]["origin"] == "hermes"
 +    assert by_body["orphan fact"]["origin"] == "hermes"
 diff --git a/tests/agent/test_learning_mutations.py b/tests/agent/test_learning_mutations.py
-index 7d2ef8d963a37866796367a81c212d62d57dc043..e0460521321102b509361a4d3a33d8fccde1f3d6 100644
+index f04a3f842f3910ed3ca31b7c27ec49d6db0717ca..ff3bbea76ffc3f8c5e3e7f1851e5a9bee5f97908 100644
 --- a/tests/agent/test_learning_mutations.py
 +++ b/tests/agent/test_learning_mutations.py
-@@ -91,3 +91,86 @@ def test_memory_writes_match_memory_tool_format(home):
- 
-     assert entries == ["alpha rewritten", "beta note"]
-     assert path.read_text(encoding="utf-8") == ENTRY_DELIMITER.join(entries)
+@@ -255,0 +256,121 @@ def test_mutation_targets_the_clicked_card_when_the_list_shifted_before_submit(h
 +
 +
 +def test_provider_memory_nodes_are_read_only(home):
@@ -5432,7 +4274,7 @@ index 7d2ef8d963a37866796367a81c212d62d57dc043..e0460521321102b509361a4d3a33d8fc
 +        assert "honcho" in result["message"]
 +        assert "read-only" in result["message"]
 +    # Files untouched.
-+    assert "alpha note" in (home / "memories" / "MEMORY.md").read_text(encoding="utf-8")
++    assert "alpha note" in (home / "memories" / "MEMORY.md").read_text(encoding="utf-8-sig")
 +
 +
 +# ── build_recall_draft: recall a node's knowledge into a session ─────────────
@@ -5498,12 +4340,50 @@ index 7d2ef8d963a37866796367a81c212d62d57dc043..e0460521321102b509361a4d3a33d8fc
 +    res = lm.build_recall_draft("memory:memory:999")
 +    assert res["ok"] is False
 +    assert "stale" in res["message"] or "not in the current" in res["message"]
++
++
++
++def test_recall_draft_accepts_fingerprinted_and_legacy_ids(home):
++    """Journey recall resolves fingerprinted memory ids (#119668): the id the
++    graph renders (``memory:<source>:<index>:<fingerprint>``) recalls directly; a legacy
++    positional id (older graph, hand-typed ``/recall``) resolves to the same card and the
++    draft reports the canonical id; a fingerprint that no longer matches is refused."""
++    from agent.learning_graph import build_learning_graph
++
++    node = next(n for n in build_learning_graph()["nodes"] if n["kind"] == "memory")
++    assert node["id"].count(":") == 3  # file cards carry a fingerprint
++
++    direct = lm.build_recall_draft(node["id"])
++    assert direct["ok"] and direct["id"] == node["id"] and "alpha note" in direct["text"]
++
++    legacy = lm.build_recall_draft("memory:memory:0")
++    assert legacy["ok"] and legacy["id"] == node["id"] and "alpha note" in legacy["text"]
++
++    stale = lm.build_recall_draft("memory:memory:0:000000000000")
++    assert stale["ok"] is False
++    assert "not in the current" in stale["message"]
++
++
++def test_provider_node_ids_stay_positional_and_read_only(home, monkeypatch):
++    """Provider cards have no fingerprint (they are read-only in the journey), so their ids
++    keep the positional ``memory:<provider>:<index>`` shape and mutations still name the
++    provider instead of failing as a malformed id."""
++    from agent import learning_graph
++
++    monkeypatch.setattr(learning_graph, "_provider_memory_cards",
++                        lambda limit=10000: [{"source": "honcho", "origin": "hermes", "timestamp": None,
++                                              "title": "provider fact", "body": "provider fact"}])
++    nodes = [n for n in learning_graph.build_learning_graph()["nodes"] if n["kind"] == "memory"]
++    provider = next(n for n in nodes if n["memorySource"] == "honcho")
++    assert provider["id"] == f"memory:honcho:{nodes.index(provider)}"
++    res = lm.edit_node(provider["id"], "new text")
++    assert res["ok"] is False and "honcho" in res["message"] and "read-only" in res["message"]
 diff --git a/tests/agent/test_provider_session_materialize.py b/tests/agent/test_provider_session_materialize.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..233b91f47b8dc6f1baa5e2868b5e7ef74c651b93
+index 0000000000000000000000000000000000000000..70b50f2f71c34940b3a24b2c8306e75d91cc3e13
 --- /dev/null
 +++ b/tests/agent/test_provider_session_materialize.py
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,170 @@
 +"""build_provider_session_import — journey "recreate this conversation".
 +
 +Covers the corpus→import_sessions transform: role mapping (explicit provider
@@ -5516,6 +4396,10 @@ index 0000000000000000000000000000000000000000..233b91f47b8dc6f1baa5e2868b5e7ef7
 +
 +import pytest
 +
++# SessionDB's message-display classifier lazily imports the conversation loop.
++# Import it during collection, before the suite installs its filesystem guard,
++# so this end-to-end test also runs from a checkout inside HERMES_HOME.
++import agent.conversation_loop  # noqa: F401
 +import agent.learning_mutations as lm
 +
 +
@@ -5536,7 +4420,7 @@ index 0000000000000000000000000000000000000000..233b91f47b8dc6f1baa5e2868b5e7ef7
 +    monkeypatch.setattr(pm, "load_memory_provider", lambda n: provider)
 +
 +
-+def _msg(content, peer="toby", role=None, timestamp=None):
++def _msg(content, peer="alice", role=None, timestamp=None):
 +    out = {"content": content, "peer": peer, "timestamp": timestamp}
 +    if role is not None:
 +        out["role"] = role
@@ -5548,7 +4432,7 @@ index 0000000000000000000000000000000000000000..233b91f47b8dc6f1baa5e2868b5e7ef7
 +
 +def test_explicit_roles_win(monkeypatch):
 +    _wire(monkeypatch, _FakeProvider([
-+        _msg("q1", peer="toby", role="user", timestamp=1700000000),
++        _msg("q1", peer="alice", role="user", timestamp=1700000000),
 +        _msg("a1", peer="chatgpt", role="assistant", timestamp=1700000060),
 +    ]))
 +
@@ -5670,6 +4554,87 @@ index 0000000000000000000000000000000000000000..233b91f47b8dc6f1baa5e2868b5e7ef7
 +    ]
 +    # Original provenance timestamp survived the import.
 +    assert abs(msgs[0]["timestamp"] - 1690000000) < 1
+diff --git a/tests/hermes_cli/test_learning_provider_session.py b/tests/hermes_cli/test_learning_provider_session.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b60d6e32e19e38a9fd2831594b2ba709deea1fa
+--- /dev/null
++++ b/tests/hermes_cli/test_learning_provider_session.py
+@@ -0,0 +1,75 @@
++"""HTTP contracts for Journey provider-session provenance."""
++
++from starlette.testclient import TestClient
++
++from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
++
++
++def _client():
++    client = TestClient(app)
++    client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
++    return client
++
++
++def test_recall_draft_route_returns_mutation_result(monkeypatch):
++    import agent.learning_mutations as mutations
++
++    expected = {
++        "connected_count": 0,
++        "findings": [],
++        "id": "memory:memory:0:abcdef123456",
++        "kind": "memory",
++        "label": "remember this",
++        "ok": True,
++        "text": "reference context",
++        "truncated": False,
++    }
++    monkeypatch.setattr(mutations, "build_recall_draft", lambda node_id: expected if node_id == expected["id"] else {})
++
++    response = _client().get(
++        "/api/learning/recall-draft",
++        params={"id": expected["id"]},
++    )
++
++    assert response.status_code == 200
++    assert response.json() == expected
++
++
++def test_provider_session_route_preserves_provider_role(monkeypatch):
++    """The source-corpus endpoint must not discard role attribution supplied
++    by a provider; desktop and web clients type and consume this field."""
++
++    class Provider:
++        def journey_session_messages(self, session_id, limit=500):
++            assert session_id == "source-session"
++            return [
++                {
++                    "content": "question",
++                    "peer": "human",
++                    "role": "user",
++                    "timestamp": 1_700_000_000,
++                },
++                {
++                    "content": "answer",
++                    "peer": "agent",
++                    "role": "assistant",
++                    "timestamp": 1_700_000_100,
++                },
++            ][:limit]
++
++    import plugins.memory as pm
++
++    monkeypatch.setattr(pm, "_get_active_memory_provider", lambda: "fakemem")
++    monkeypatch.setattr(pm, "load_memory_provider", lambda _name: Provider())
++
++    client = _client()
++    response = client.get(
++        "/api/learning/provider-session",
++        params={"session_id": "source-session"},
++    )
++
++    assert response.status_code == 200
++    assert [m["role"] for m in response.json()["messages"]] == [
++        "user",
++        "assistant",
++    ]
 diff --git a/tests/plugins/memory/test_honcho_journey_cards.py b/tests/plugins/memory/test_honcho_journey_cards.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..a8fa61229653390e5ced1d93b03970a051413fd9
@@ -5971,138 +4936,6 @@ index 0000000000000000000000000000000000000000..a8fa61229653390e5ced1d93b03970a0
 +    _set_client(monkeypatch, _FakeSessionClient({"sess-1": sess}))
 +
 +    assert len(provider.journey_session_messages("sess-1", limit=5)) == 5
-diff --git a/tests/test_learning_cross_insert.py b/tests/test_learning_cross_insert.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..3e30c4c6996eb4ae27c5c3cdc6626a0b0b08bbdf
---- /dev/null
-+++ b/tests/test_learning_cross_insert.py
-@@ -0,0 +1,129 @@
-+"""Regression test: POST /api/learning/node/cross-insert must write to the
-+SAME file the learning graph reads — ``<home>/memories/MEMORY.md`` — not the
-+profile root ``<home>/MEMORY.md``.
-+
-+Bug fixed 2026-08-21: the endpoint wrote to ``get_hermes_home()/MEMORY.md``
-+and returned ok=True, but ``agent.learning_graph._memory_cards`` reads
-+``get_hermes_home()/memories/MEMORY.md`` — so the insert silently never
-+appeared on the target profile's star map.
-+"""
-+
-+import pathlib
-+
-+import pytest
-+from starlette.testclient import TestClient
-+
-+from hermes_cli import web_server, web_server_profiles
-+from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN, app
-+
-+
-+@pytest.fixture()
-+def client():
-+    c = TestClient(app)
-+    c.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
-+    return c
-+
-+
-+def test_cross_insert_writes_graph_visible_memories_file(
-+    client, tmp_path, monkeypatch
-+):
-+    source_home = tmp_path / "profiles" / "src-bot"
-+    target_home = tmp_path / "profiles" / "dst-bot"
-+    (source_home / "memories").mkdir(parents=True)
-+    (target_home / "memories").mkdir(parents=True)
-+    (target_home / "memories" / "MEMORY.md").write_text(
-+        "existing target entry\n", encoding="utf-8"
-+    )
-+
-+    homes = {"src-bot": source_home, "dst-bot": target_home}
-+
-+    import contextlib
-+
-+    @contextlib.contextmanager
-+    def fake_profile_scope(profile):
-+        import hermes_constants
-+
-+        token = hermes_constants.set_hermes_home_override(str(homes[profile]))
-+        try:
-+            yield homes[profile]
-+        finally:
-+            hermes_constants.reset_hermes_home_override(token)
-+
-+    monkeypatch.setattr(
-+        web_server_profiles, "_profile_scope", fake_profile_scope
-+    )
-+
-+    import agent.learning_mutations as lm
-+
-+    def fake_node_detail(node_id):
-+        assert node_id == "memory:memory:0"
-+        return {
-+            "ok": True,
-+            "kind": "memory",
-+            "content": "cross-inserted fact body",
-+        }
-+
-+    monkeypatch.setattr(lm, "node_detail", fake_node_detail)
-+
-+    resp = client.post(
-+        "/api/learning/node/cross-insert",
-+        json={
-+            "id": "memory:memory:0",
-+            "source_profile": "src-bot",
-+            "target_profile": "dst-bot",
-+        },
-+    )
-+    assert resp.status_code == 200
-+    body = resp.json()
-+    assert body["ok"] is True, body
-+
-+    # THE regression: content must land in memories/MEMORY.md (graph-visible)
-+    graph_file = target_home / "memories" / "MEMORY.md"
-+    text = graph_file.read_text(encoding="utf-8")
-+    assert "cross-inserted fact body" in text
-+    assert "[Imported from profile: src-bot]" in text
-+    assert text.startswith("existing target entry")  # append, never clobber
-+
-+    # and must NOT create the dead profile-root file the bug wrote to
-+    assert not (target_home / "MEMORY.md").exists()
-+
-+
-+def test_cross_insert_refuses_skill_nodes(client, tmp_path, monkeypatch):
-+    home = tmp_path / "profiles" / "any-bot"
-+    (home / "memories").mkdir(parents=True)
-+
-+    import contextlib
-+
-+    @contextlib.contextmanager
-+    def fake_profile_scope(profile):
-+        import hermes_constants
-+
-+        token = hermes_constants.set_hermes_home_override(str(home))
-+        try:
-+            yield home
-+        finally:
-+            hermes_constants.reset_hermes_home_override(token)
-+
-+    monkeypatch.setattr(
-+        web_server_profiles, "_profile_scope", fake_profile_scope
-+    )
-+
-+    import agent.learning_mutations as lm
-+
-+    monkeypatch.setattr(
-+        lm,
-+        "node_detail",
-+        lambda node_id: {"ok": True, "kind": "skill", "content": "skill body"},
-+    )
-+
-+    resp = client.post(
-+        "/api/learning/node/cross-insert",
-+        json={
-+            "id": "some-skill",
-+            "source_profile": "any-bot",
-+            "target_profile": "any-bot",
-+        },
-+    )
-+    assert resp.status_code == 200
-+    assert resp.json()["ok"] is False
-+    assert "not supported" in resp.json()["message"]
+-- 
+2.54.0 (Apple Git-157)
+

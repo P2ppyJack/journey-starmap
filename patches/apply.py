@@ -1,59 +1,82 @@
 #!/usr/bin/env python3
-"""Apply a hash-verified Journey source patch to an isolated Git checkout."""
+"""Apply the verified Journey patch to an isolated Git checkout."""
+
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 
 PACKAGE = Path(__file__).resolve().parent
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def git(repo, *args, env=None, payload=None):
-    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, env=env, input=payload)
+def git(repo: Path, *args: str, env=None) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        env=env,
+        text=True,
+    )
     if result.returncode:
-        raise RuntimeError(result.stderr.decode(errors='replace').strip() or f'git failed: {args[0]}')
-    return result.stdout.decode().strip()
+        message = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(message or f"git failed: {args[0]}")
+    return result.stdout.strip()
 
 
-def main():
-    if len(sys.argv) != 1:
-        raise RuntimeError('no arguments supported; run from the root of the isolated target checkout')
-    repo = Path.cwd()
-    manifest = json.loads((PACKAGE/'manifest.json').read_text())
-    payload = (PACKAGE/'full.patch').read_bytes()
-    if hashlib.sha256(payload).hexdigest() != manifest['full_patch']['sha256']:
-        raise RuntimeError('patch checksum mismatch; target was not changed')
-    head = git(repo, 'rev-parse', 'HEAD')
-    if head not in (manifest['base_commit'], manifest['head_commit']):
-        raise RuntimeError('unsupported base commit; use the pinned isolated checkout')
-    if git(repo, 'diff', '--no-ext-diff') or git(repo, 'ls-files', '--others', '--exclude-standard'):
-        raise RuntimeError('target must be clean, including untracked files')
-    tree = git(repo, 'write-tree')
-    if tree == manifest['head_tree']:
-        print('OK: exact source tree already applied; nothing changed.')
-        return
-    if head != manifest['base_commit'] or tree != manifest['base_tree']:
-        raise RuntimeError('target index is not the pinned clean base or exact applied tree')
-    # Reconstruct in a temporary index first; no target index/worktree writes.
-    with tempfile.TemporaryDirectory(prefix='journey-preflight-') as tmp:
-        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp)/'index'))
-        git(repo, 'read-tree', manifest['base_tree'], env=env)
-        git(repo, 'apply', '--cached', env=env, payload=payload)
-        if git(repo, 'write-tree', env=env) != manifest['head_tree']:
-            raise RuntimeError('package does not produce the expected source tree; target unchanged')
-    git(repo, 'apply', '--check', '--index', payload=payload)
-    git(repo, 'apply', '--index', payload=payload)
-    if git(repo, 'write-tree') != manifest['head_tree']:
-        raise RuntimeError('applied tree mismatch; inspect target without retrying')
-    print('OK: patch applied and staged. Runtime installation was not performed.')
+def load_package() -> tuple[dict, Path]:
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError("unsupported manifest schema; target was not changed")
+
+    item = manifest.get("patch")
+    if not isinstance(item, dict):
+        raise RuntimeError("invalid patch manifest; target was not changed")
+    relative = Path(str(item.get("path", "")))
+    if relative.is_absolute() or relative.parent != Path(".") or relative.name != str(relative):
+        raise RuntimeError("unsafe patch path; target was not changed")
+
+    digest = str(item.get("sha256", ""))
+    if not SHA256.fullmatch(digest):
+        raise RuntimeError("invalid patch checksum; target was not changed")
+    patch = PACKAGE / relative
+    if hashlib.sha256(patch.read_bytes()).hexdigest() != digest:
+        raise RuntimeError("patch checksum mismatch; target was not changed")
+    return manifest, patch
 
 
-if __name__ == '__main__':
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise RuntimeError("usage: apply.py PATH_TO_PINNED_HERMES_CHECKOUT")
+
+    manifest, patch = load_package()
+    repo = Path(sys.argv[1]).resolve()
+    if git(repo, "rev-parse", "HEAD") != manifest["upstream_base"]:
+        raise RuntimeError("unsupported base commit; use the pinned checkout")
+    if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise RuntimeError("target must be clean, including untracked files")
+    if git(repo, "rev-parse", "HEAD^{tree}") != manifest["upstream_base_tree"]:
+        raise RuntimeError("base tree mismatch; target was not changed")
+
+    with tempfile.TemporaryDirectory(prefix="journey-patch-") as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        git(repo, "read-tree", manifest["upstream_base_tree"], env=env)
+        git(repo, "apply", "--3way", "--unidiff-zero", "--cached", str(patch), env=env)
+        if git(repo, "write-tree", env=env) != manifest["result_tree"]:
+            raise RuntimeError("patch result mismatch; target was not changed")
+
+    git(repo, "apply", "--3way", "--unidiff-zero", "--index", str(patch))
+    if git(repo, "write-tree") != manifest["result_tree"]:
+        raise RuntimeError("applied tree mismatch; inspect the target")
+    print("OK: Journey patch applied and staged.")
+
+
+if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        print(f'error: {exc}', file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)

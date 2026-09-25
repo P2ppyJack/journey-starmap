@@ -1,119 +1,124 @@
-# Journey star map — source patch mirror
+# Journey star map
 
-Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser
+Version **0.3.0** packages the Journey feature from [Hermes Agent PR #70309](https://github.com/NousResearch/hermes-agent/pull/70309) as one source patch. It is not a standalone application or an upstream Hermes release.
 
-This repository packages [Hermes PR #70309](https://github.com/NousResearch/hermes-agent/pull/70309): provider-aware memory nodes, provenance, search/filter, desktop `/recall`, and cross-profile memory consolidation. It is a **source patch package**, not a standalone application or an upstream release. The separate web `/starjourney` port is not included.
+| Item | Pinned value |
+|---|---|
+| Upstream repository | `NousResearch/hermes-agent` |
+| Upstream base | `7b761da2de4979e424510ca7022bf9527aa65b68` |
+| Feature commit | `807a67b78f8aaa575e8ef5bfa241f1ee5b90e886` |
+| Resulting tree | `8f656cbd8abd015f27268bab5c3f61eb0f742e41` |
+| Patch | [`patches/0001-feat-journey-provider-memory-nodes-star-map-provenan.patch`](patches/0001-feat-journey-provider-memory-nodes-star-map-provenan.patch) |
 
-- **Canonical development branch:** [P2ppyJack/hermes-agent — feat/journey-provider-memory-nodes](https://github.com/P2ppyJack/hermes-agent/tree/feat/journey-provider-memory-nodes)
-- **Pinned base:** `62e5f466565ee56351e4483ead8e62f9e782f8b3`
-- **Source head:** `6c3780a4befcedebac5ba92ba9f5c0a8c2cb3d4c`
-- **Expected tree:** `1c05206f34511ba6885872da4d044f56eddc1314`
-- **Package:** one refreshed source commit, 43 changed source files; either `patches/full.patch` or the numbered format-patch. Use one format, not both.
-- **Provenance and checksums:** [SOURCE.txt](patches/SOURCE.txt), [manifest.json](patches/manifest.json).
-- **License:** [MIT](LICENSE); upstream retains its copyright.
+## What the feature adds
 
-## Why this refresh exists
+- **Provider memory nodes:** optional memory-provider hooks append read-only cards to the existing skill and file-memory graph. Providers without the hooks continue to return no additional cards.
+- **Where this came from:** provider cards expose origin and source-session metadata. The desktop can show matching Hermes sessions, inspect the provider corpus, and recreate a provider conversation through the validated session-import path.
+- **Search and filters:** search covers titles and full card bodies. Filters narrow the map by node type, source, and date.
+- **Recall into a composer:** `/recall` opens the map in recall mode. A selected node can be inserted into the visible chat or saved as a reviewed draft for another session; it is never sent automatically.
+- **Read-only provider boundary:** edit and delete remain available for local memory files, while provider-backed nodes identify their provider and refuse mutation.
+- **Share codes:** version 4 preserves provider source names, and existing version 3 codes remain readable.
 
-The earlier package targeted an older Hermes layout. The refreshed source keeps the modern status-router modules and Radix context menu instead of restoring the old web-server monolith or menu implementation. This reduces conflicts without discarding the existing provider, provenance and recall features.
+The patch contains only the Journey backend and desktop feature. It does **not** include multi-profile selection or cross-profile insertion, a web star-map page, native-turn gateway changes, session-coordination changes, or desktop-backend attachment changes.
 
-The old apply helper attempted three-way application and retried plain application after failure. The replacement validates the payload, exact base and target cleanliness first, then rehearses the patch in a temporary Git index. Only a rehearsal producing the expected source tree can reach the real index/worktree. It never falls back after a failed mutation.
+## Where this came from
 
-## Prepare an isolated checkout
+The feature extends the existing `MemoryProvider`, learning graph, status router, and desktop star-map components rather than adding a second graph system:
 
-**Do not apply this to your running Hermes installation.** Use a new checkout, with the patch repository beside it—not nested inside it. The helper refuses untracked files and unrelated changes. Requirements: Git, Python 3, and a POSIX shell for the wrapper. Native Windows users can call `python patches/apply.py` with the appropriate relative path; the new packaging helper itself has not been exercised in a Windows VM.
+1. `journey_cards()` provides bounded, best-effort provider cards.
+2. `journey_session_messages()` provides source messages for provenance inspection.
+3. `agent.learning_graph` appends provider cards after local memory cards so existing local positions remain stable.
+4. `agent.learning_mutations` builds recall drafts and imports provider sessions while keeping provider storage read-only.
+5. The status router exposes profile-scoped graph, provenance, recall, and materialization endpoints.
+6. The desktop star map renders, searches, filters, shares, and recalls those nodes.
+
+## Requirements
+
+- Git with three-way apply support.
+- Python 3.11 or newer for the apply helper and package tests.
+- The exact upstream base shown above. The helper rejects any other commit or a dirty target.
+- For the desktop build, the Node.js and npm versions declared by the pinned Hermes checkout, plus any platform toolchain required by `apps/desktop/BUILDING.md`.
+
+## Installation
+
+Use a disposable checkout rather than a running Hermes installation:
 
 ```bash
-# Run in a new working directory; do not reuse your active Hermes source tree.
 git clone https://github.com/P2ppyJack/journey-starmap.git
 git clone https://github.com/NousResearch/hermes-agent.git hermes-agent-journey
+git -C hermes-agent-journey switch --detach 7b761da2de4979e424510ca7022bf9527aa65b68
+python3 journey-starmap/patches/apply.py hermes-agent-journey
+```
+
+The helper verifies the patch checksum, exact base, clean target, and expected result in a temporary index before invoking `git apply --3way --unidiff-zero --index`. It leaves the feature staged and does not move `HEAD`, install dependencies, build an application, modify user data, or restart a process.
+
+Confirm the staged source tree:
+
+```bash
+git -C hermes-agent-journey diff --cached --check
+git -C hermes-agent-journey write-tree
+# 8f656cbd8abd015f27268bab5c3f61eb0f742e41
+```
+
+Install dependencies and build the desktop from the patched checkout:
+
+```bash
 cd hermes-agent-journey
-git fetch origin 62e5f466565ee56351e4483ead8e62f9e782f8b3
-git switch --detach 62e5f466565ee56351e4483ead8e62f9e782f8b3
-bash ../journey-starmap/patches/apply.sh
+npm ci
+npm run build --workspace apps/desktop
 ```
 
-The helper takes **no arguments**. It leaves the feature staged without creating a commit or moving HEAD. Review with `git diff --cached --stat` and `git diff --cached`. `git write-tree` must print the expected tree above. Repeating the helper on that exact staged tree is a no-op; a clean checkout of the exact published source head is also recognized. Dirty, partially staged, wrong-base and corrupt-package cases are refused.
-
-A Git linked worktree (`.git` is a file) is supported. Checksums protect against accidental corruption, not a maliciously replaced package and manifest. Use a reviewed repository revision. An unexpected operating-system/I/O failure during the final Git operation remains an error: inspect the isolated target rather than retrying or assuming rollback. This helper does not lock out other processes—do not edit the target concurrently.
-
-### Build, test and activate separately
-
-Follow the pinned checkout's own `CONTRIBUTING.md`, dependency lockfiles and platform build instructions. The patch helper does **not** install dependencies, build Electron, copy an app, migrate user data, change configuration, or restart any process.
-
-The focused source check previously exercised on this head is:
+For an unpacked desktop application, use the pinned checkout's packaging requirements and run:
 
 ```bash
-HERMES_TEST_WORKERS=2 HERMES_TEST_FILE_RETRIES=0 bash scripts/run_tests.sh \
-  tests/agent/test_learning_graph.py tests/agent/test_learning_mutations.py \
-  tests/agent/test_provider_session_materialize.py \
-  tests/plugins/memory/test_honcho_journey_cards.py \
-  tests/test_learning_cross_insert.py -q
+npm run pack --workspace apps/desktop
 ```
 
-Before any actual activation, back up your installation and data, stop every runtime importing that installation, build/test the candidate, and use Hermes' platform-specific installation procedure. The desktop app, its backend, dashboards, gateway and interactive TUI sessions can retain old loaded code. Verify the restarted consumer, not merely a fresh file on disk. Never copy Python source underneath a running process.
+Review the upstream build and installation documentation before replacing an installed application. Applying this source patch alone does not activate the feature.
 
-### Upgrade and rollback
+## Usage
 
-This is an exact-base snapshot, not an update manager. To adopt a newer package, create a **new** isolated checkout at its declared base and repeat its tests; do not stack packages or force an old patch onto current `main`. The previous mirror package remains available in Git history.
+1. Open Journey from the desktop or run `/journey`.
+2. Use the sidebar to search text or filter by type, source, and date.
+3. Open a provider node and choose **Where this came from** to inspect source sessions or messages.
+4. Run `/recall`, select a node, and insert its reference text into the visible composer for review.
+5. Use the node menu to add the same reviewed draft to another existing session.
+6. Export and import map share codes as needed; version 3 and version 4 codes are supported.
 
-For a prepared but unused checkout, rollback is simply to keep using the original untouched installation and discard only the disposable checkout when no longer needed. For a deployed application, restore the separately preserved installation during a stopped-runtime boundary. The helper provides no automatic rollback of an already-deployed application or user state.
+## Rollback and uninstall
 
-## How the feature works
+Before activation, discard the disposable patched checkout and continue using an unmodified Hermes checkout. Do not stack this patch on another base.
 
-1. **Provider read hooks:** the memory-provider interface offers optional `journey_cards` and `journey_session_messages` hooks. Default empty responses leave providers without these hooks unaffected. Cards append after file memories; provider failures degrade to an empty contribution rather than a broken map.
-2. **Graph and source context:** the graph includes source, origin and session provenance. Search/filter narrows cards by text, type, source and time. Provider nodes are read-only; provider edit/delete is refused.
-3. **Provenance and session recovery:** users can inspect matching local sessions or a provider corpus. Recreating a provider conversation uses the validated session-import seam, preserving its identifier/timestamps without overwriting an existing session.
-4. **Recall:** a selected card becomes editable reference context in the desktop composer or a draft for another session. The reference framing helps distinguish data from instructions; it does not guarantee protection from prompt injection.
-5. **Multiple profiles:** selected profile graphs merge with source-profile tags and prefixed identifiers. Recall resolves the originating profile. Explicit cross-profile insertion copies a memory or supported conclusion into another profile's memory file with a provenance note; skills are refused.
-6. **Sharing and compatibility:** share-code v4 carries provider sources while v3 decoding remains supported. Single-profile behavior remains the default. No schema/config migration is included. Positional memory identifiers remain sensitive to later edits/deletions of existing file memories.
+If a desktop build made from the patch was installed, stop the affected application, replace it through the normal Hermes installation path, and verify that the replacement uses unmodified upstream source. This package does not automate deployment rollback or user-data restoration.
 
-### Component responsibilities
+## Compatibility and limits
 
-| Component | Responsibility |
-|---|---|
-| `agent/memory_provider.py`, provider plugin | Optional read hooks and provider-specific corpus access |
-| `agent/learning_graph.py`, `agent/learning_mutations.py` | Graph construction, read-only boundaries, reference drafts, validated imports |
-| `hermes_cli/web_routers/status.py`, `web_models.py` | Profile-scoped routes through existing authentication and execution helpers |
-| `apps/desktop/src/api/skills.ts` | Desktop API client, kept behind the modern export barrel |
-| Desktop `starmap/` components | Canvas, search, provenance, profile selector and actions |
-| `patches/apply.py` | Exact-package preflight and application; not runtime deployment |
+- The package supports only upstream commit `7b761da2de4979e424510ca7022bf9527aa65b68`.
+- Provider hooks are optional and best-effort; provider failures produce no provider cards rather than preventing the map from loading.
+- Provider-backed nodes are read-only through Journey.
+- Recall text is framed as untrusted reference data, but that framing is not a complete prompt-injection defense. Review drafts before sending.
+- The package has no configuration or data-schema migration.
+- Multi-profile and cross-profile features are not included. Screenshots 12 and 13 illustrate those excluded features and are retained only as existing repository assets.
 
-## Verification and limits
+## Screenshots
 
-**Source head evidence:** focused macOS Python checks: **42 passed**. Selected Windows 11 VM Python checks: **237 passed, 5 skipped**, using x64 Python 3.11.14 and locked dependencies. The original Windows runner did not retain the five skip reasons; those are unverified coverage, not passes. Earlier expanded source/renderer results are documented on the PR, not rerun or restamped by this mirror rebuild.
+The included-feature views are illustrated by screenshots 01 through 11 under [`docs/screenshots/`](docs/screenshots/), including the map overview, search, provenance, source corpus, and recall flow.
 
-**Package verification:** the repository's tests exercise dirty/partial/wrong-base refusal, checksum/tree mismatches, exact apply/repeat, published-head no-op, linked-worktree support, and invalid-argument refusal. `verify_source.py` independently reconstructs the source tree from both package formats and checks the preserved screenshot/license hashes. These tests are separate from Hermes feature tests.
+## Verification
+
+Run the package tests from this repository:
 
 ```bash
-# From this mirror repository:
 python3 -m unittest discover -s tests -v
-python3 tests/verify_source.py /path/to/source-hermes-agent
+python3 tests/verify_source.py /path/to/hermes-agent
 ```
 
-The second command needs an existing source clone containing both pinned commits; it creates disposable local clones, uses no network, and does not change the source clone.
+The second command verifies that the patch reconstructs the declared tree from the pinned base without modifying the source worktree or index.
 
-Hosted CI for the submitted source was awaiting upstream maintainer approval at preparation time; it is **not certified passing** here. The packaged Windows GUI, installer/upgrade lifecycle, Linux runtime and native ARM64 Windows behavior are not established by the selected Windows Python suites. The new packaging helper's recorded execution is on macOS. Historical screenshots are illustrations, not current acceptance results.
+## License
 
-## Historical screenshots
+MIT. See [LICENSE](LICENSE). The source patch retains the upstream project's license terms.
 
-These existing images are preserved byte-for-byte. Captures 01–11 were made with synthetic data; 12–13 were earlier tightly framed multi-profile UI captures. They have not been recaptured or newly privacy-certified in this package refresh.
+## Credits
 
-| View | Image |
-|---|---|
-| Journey command | ![Journey command](docs/screenshots/01-slash-journey-composer.png) |
-| Overview | ![Overview](docs/screenshots/02-star-map-overview.png) |
-| Search | ![Search](docs/screenshots/03-search-sidebar.png) |
-| Results | ![Results](docs/screenshots/04-search-results.png) |
-| Conclusions | ![Conclusion filter](docs/screenshots/05-filter-conclusions.png) |
-| Actions | ![Context menu](docs/screenshots/06-node-context-menu.png) |
-| Provenance | ![Provenance](docs/screenshots/07-provenance-sessions.png) |
-| Corpus | ![Corpus](docs/screenshots/08-source-corpus.png) |
-| Recall picker | ![Recall mode](docs/screenshots/09-recall-mode.png) |
-| Recall actions | ![Recall menu](docs/screenshots/10-recall-menu.png) |
-| Composer draft | ![Recall draft](docs/screenshots/11-recall-inserted-composer.png) |
-| Profiles | ![Profile selector](docs/screenshots/12-multi-profile-selector.png) |
-| Cross-profile copy | ![Cross-profile insert](docs/screenshots/13-cross-profile-insert.png) |
-
----
-
-Hermes analyzed and drafted; Tobias Musser supplied business context, adjudicated judgment calls, and corrected conclusions.
+Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser.
