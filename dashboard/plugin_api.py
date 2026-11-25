@@ -415,6 +415,8 @@ def _settings_key() -> str:
         return json.dumps(_plugin_settings(), sort_keys=True, default=str)
     except Exception:
         return ""
+
+
 _reading = threading.Lock()
 
 

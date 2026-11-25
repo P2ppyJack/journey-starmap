@@ -41,8 +41,8 @@ def load_backend(identity=IDENTITY, settings=None, *, raw: bool = False):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if not raw:
-        module._honcho_identity = lambda: identity
-        module._plugin_settings = lambda: dict(settings or {})
+        setattr(module, "_honcho_identity", lambda: identity)
+        setattr(module, "_plugin_settings", lambda: dict(settings or {}))
     return module
 
 
@@ -571,6 +571,24 @@ def test_peers_outside_the_scopes_are_reported_unless_excluded(monkeypatch):
     payload = module._read_card_scopes()
 
     assert payload["unknown_peers"] == ["notes-import"]
+
+
+def test_a_settings_change_is_never_hidden_by_the_card_cache(monkeypatch):
+    settings = {"extra_scopes": []}
+    module = load_backend()
+    monkeypatch.setattr(module, "_plugin_settings", lambda: dict(settings))
+    reads = []
+    monkeypatch.setattr(module, "_read_card_scopes", lambda: reads.append(1) or {"cards": [], "partial": False})
+
+    module.provider_cards()
+    module.provider_cards()
+    assert len(reads) == 1  # the second call is served from the cache
+
+    settings["extra_scopes"] = [{"observer": "notes-import"}]
+    module.provider_cards()
+    assert len(reads) == 2  # the edited settings forced a fresh read
+    module.provider_cards()
+    assert len(reads) == 2  # and the fresh result is cached again
 
 
 def test_no_identity_and_no_settings_is_an_explained_empty_read(monkeypatch):
