@@ -1,0 +1,39 @@
+name: journey-starmap
+version: 1.0.0
+manifest_version: 2
+kind: standalone
+description: >-
+  Journey star map for Hermes Desktop: learned skills, memory files and memory-provider
+  conclusions drawn as an interactive star map, with provenance drill-down, search and
+  filters, recall into a chat, and a multi-profile view. Plugin only; no Hermes source patch.
+author: Tobias Musser
+license: MIT
+homepage: https://github.com/P2ppyJack/journey-starmap
+requires_hermes: ">=0.23.3"
+tags: [desktop, memory, honcho, visualization, journey]
+config_schema:
+  card_scopes:
+    type: list
+    default: []
+    label: Card scopes (replace the defaults)
+    description: >-
+      Optional. Exactly which Honcho conclusion scopes to read, in this order. Each entry
+      is {"observer": "<peer>", "target": "<peer>", "role": "owner|ai|legacy|import"} or
+      ["observer", "target", "role"]. Leave empty to derive them from your Honcho config:
+      your own conclusions, the AI peer's conclusions about you, and any runtime ids
+      aliased to you with userPeerAliases.
+  extra_scopes:
+    type: list
+    default: []
+    label: Extra card scopes
+    description: >-
+      Optional. Scopes read after the default (or configured) list, for example an
+      imported chat history: {"observer": "chatgpt-import"}. A missing target means the
+      peer observes itself; a missing role means "import".
+  exclude_peers:
+    type: list
+    default: []
+    label: Peers to leave out of the report
+    description: >-
+      Optional. Peer ids that are deliberately not read (test fixtures, other people's
+      peers). They are left out of the map's "peers not read" list.

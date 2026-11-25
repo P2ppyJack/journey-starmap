@@ -1,3 +1,0 @@
-# Generated patch context prefixes and format-patch trailers preserve whitespace.
-# Source whitespace is checked in the source commit range, not the patch container.
-patches/*.patch whitespace=-blank-at-eol,-blank-at-eof

@@ -1,4 +1,9 @@
+node_modules/
 __pycache__/
 *.py[cod]
+tests/smoke.bundle.mjs
+.tmp/
 .test-tmp/
 .source/
+.DS_Store
+tests/register.bundle.mjs

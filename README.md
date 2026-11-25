@@ -1,127 +1,265 @@
-# Journey star map
+# Journey star map — a Hermes Desktop plugin
 
-Version **0.4.0** packages the Journey feature from [Hermes Agent PR #70309](https://github.com/NousResearch/hermes-agent/pull/70309) as one source patch. It is not a standalone application or an upstream Hermes release.
+An interactive star map of what your Hermes agent has learned. It shows learned
+skills, `MEMORY.md` / `USER.md` cards and, when Honcho is your memory provider, every
+Honcho conclusion. Each item is a star, placed by when it was learned (core = oldest,
+outer rings = newer). You can search and filter the map, trace a memory back to the
+conversation it came from, and put a memory into a chat as reviewed reference text.
 
-| Item | Pinned value |
+It is a **plugin only**. Nothing in Hermes is patched, so a Hermes update never has to
+be rebased onto it.
+
+![The star map with demo data](docs/screenshots/02-star-map-overview.png)
+
+| | |
 |---|---|
-| Upstream repository | `NousResearch/hermes-agent` |
-| Upstream base | `7b761da2de4979e424510ca7022bf9527aa65b68` |
-| Feature commit | `f5fe9afd00a195327e1c0a4335bbbe0bc9b412b6` |
-| Resulting tree | `4ba1584dc86292dca24d16b9d6f4ce420467c3bd` |
-| Patch | [`patches/0001-feat-journey-star-map-provider-memory-nodes-multi-profile.patch`](patches/0001-feat-journey-star-map-provider-memory-nodes-multi-profile.patch) |
+| Plugin id | `journey-starmap` |
+| Version | 1.0.0 |
+| Hermes | v0.23.3 or later (`requires_hermes: ">=0.23.3"`); tested on v0.23.3 and v0.23.4 |
+| Needs | the Hermes Desktop app; Honcho is optional |
+| License | MIT |
 
-## What the feature adds
+## Features
 
-- **Provider memory nodes:** optional memory-provider hooks append read-only cards to the existing skill and file-memory graph. Providers without the hooks continue to return no additional cards.
-- **Where this came from:** provider cards expose origin and source-session metadata. The desktop can show matching Hermes sessions, inspect the provider corpus, and recreate a provider conversation through the validated session-import path.
-- **Search and filters:** search covers titles and full card bodies. Filters narrow the map by node type, source, and date.
-- **Recall into a composer:** `/recall` opens the map in recall mode. A selected node can be inserted into the visible chat or saved as a reviewed draft for another session; it is never sent automatically.
-- **Read-only provider boundary:** edit and delete remain available for local memory files, while provider-backed nodes identify their provider and refuse mutation.
-- **Share codes:** version 4 preserves provider source names, and existing version 3 codes remain readable.
-- **Multi-profile mode:** a profile selector merges the chosen profiles' graphs into one map and badges each node with its profile. A memory node can be copied into another selected profile's `MEMORY.md`; the copy goes through the memory tool's locked, threat-scanned, size-capped add, and a refusal leaves that file unchanged. Skills are not copied.
+- **Map.** Radial layout with a force simulation, pan, wheel/pinch zoom, hover
+  highlighting, click selection and double-click drill-down. A timeline scrubber has
+  a play-through, plus a legend and share codes for a view. Identical conclusions are
+  drawn as one star with an `×N` count, with a toggle to show them separately.
+- **Search and filters.** A sidebar searches card bodies, not just labels. You can
+  filter by kind, source and date (range, year, month) and pulse the matches on the
+  map. Saved searches and recent searches are kept.
+- **Provenance.** "Where this came from…" opens the session that produced a node,
+  falling back to full-text session search when none was recorded. For a Honcho
+  conclusion it shows the provider's source conversation. "Recreate as Hermes
+  session" imports that conversation as a normal, continuable Hermes session. This is
+  idempotent: an existing session is never overwritten.
+- **Recall.** "Insert into this chat" and "Add to a session" put a node into a
+  composer as a draft for you to review. Nothing is sent automatically. The draft is
+  wrapped as delimited, defanged reference data rather than an instruction. "Start a
+  conversation about this…" seeds a new chat about a conclusion.
+- **Edit and delete** skills and file-memory cards through Hermes's own mutation
+  functions. **Honcho conclusions are read-only here.**
+- **Multi-profile.** A profile selector merges several profiles onto one map, with a
+  profile badge per node. A memory can be copied into another profile.
+- **Honest loading.** The Honcho read has no card ceiling and a 30-second deadline.
+  If it cannot finish, the map says *partial* instead of quietly showing fewer cards.
+  Cards are cached for five minutes and refreshed in the background.
 
-The patch contains only the Journey backend and desktop feature. It does **not** include a web dashboard star-map page, a TUI star-map link, native-turn gateway changes, session-coordination changes, or desktop-backend attachment changes.
+In the app the plugin adds four things:
 
-## Where this came from
+- a **Star map (plugin)** row in the sidebar;
+- an **Open the star map** command in the command palette (⌘K);
+- the page at `/starmap-plugin`;
+- a small `starmap: N nodes` status-bar chip.
 
-The feature extends the existing `MemoryProvider`, learning graph, status router, and desktop star-map components rather than adding a second graph system:
+It does not replace or change Hermes's built-in Journey view; the two coexist.
 
-1. `journey_cards()` provides bounded, best-effort provider cards.
-2. `journey_session_messages()` provides source messages for provenance inspection.
-3. `agent.learning_graph` appends provider cards after local memory cards so existing local positions remain stable.
-4. `agent.learning_mutations` builds recall drafts and imports provider sessions while keeping provider storage read-only.
-5. The status router exposes profile-scoped graph, provenance, recall, and materialization endpoints, a merged multi-profile graph, and a cross-profile memory insert.
-6. The desktop star map renders, searches, filters, shares, and recalls those nodes.
+## Install
 
-## Requirements
-
-- Git with three-way apply support.
-- Python 3.11 or newer for the apply helper and package tests.
-- The exact upstream base shown above. The helper rejects any other commit or a dirty target.
-- For the desktop build, the Node.js and npm versions declared by the pinned Hermes checkout, plus any platform toolchain required by `apps/desktop/BUILDING.md`.
-
-## Installation
-
-Use a disposable checkout rather than a running Hermes installation:
-
-```bash
-git clone https://github.com/P2ppyJack/journey-starmap.git
-git clone https://github.com/NousResearch/hermes-agent.git hermes-agent-journey
-git -C hermes-agent-journey switch --detach 7b761da2de4979e424510ca7022bf9527aa65b68
-python3 journey-starmap/patches/apply.py hermes-agent-journey
-```
-
-The helper verifies the patch checksum, exact base, clean target, and expected result in a temporary index before invoking `git apply --3way --unidiff-zero --index`. It leaves the feature staged and does not move `HEAD`, install dependencies, build an application, modify user data, or restart a process.
-
-Confirm the staged source tree:
+On Hermes v0.23.4 (or v0.23.3):
 
 ```bash
-git -C hermes-agent-journey diff --cached --check
-git -C hermes-agent-journey write-tree
-# 4ba1584dc86292dca24d16b9d6f4ce420467c3bd
+hermes plugins install https://github.com/P2ppyJack/journey-starmap --enable
 ```
 
-Install dependencies and build the desktop from the patched checkout:
+`--enable` adds the plugin to `plugins.enabled`, which lets its Python backend load.
+If you leave it out, run `hermes plugins enable journey-starmap` afterwards. The
+plugin has no Python or Node runtime dependencies and registers no tools or hooks.
+If the installer says *Restart the gateway for the plugin to take effect*, run
+`hermes gateway restart` when no chat is running, so the backend routes load.
+
+Then, in the **Hermes Desktop** app:
+
+1. Open **Capabilities → Plugins**. If **Journey star map** is not listed yet, click
+   **Rescan**.
+2. Switch it **on**. Hermes ships the desktop half of a plugin package opt-in, so
+   this switch is needed once.
+3. Click **Star map (plugin)** in the sidebar, or press ⌘K and run **Open the star
+   map**.
+
+Check the install at any time:
 
 ```bash
-cd hermes-agent-journey
-npm ci
-npm run build --workspace apps/desktop
+hermes plugins doctor journey-starmap
 ```
 
-For an unpacked desktop application, use the pinned checkout's packaging requirements and run:
+To pin an exact release, add `--ref <40-character commit SHA>` to `hermes plugins
+install`.
+
+### Update and uninstall
 
 ```bash
-npm run pack --workspace apps/desktop
+hermes plugins update journey-starmap     # newest commit; the app refreshes its copy on Rescan
+hermes plugins remove journey-starmap     # removes both halves
 ```
 
-Review the upstream build and installation documentation before replacing an installed application. Applying this source patch alone does not activate the feature.
+## Configure
 
-## Usage
+With no settings, the plugin reads the Honcho scopes that belong to **you**. It works
+them out from your own Honcho config (`peerName`, `aiPeer`, `userPeerAliases`):
 
-1. Open Journey from the desktop or run `/journey`.
-2. Use the sidebar to search text or filter by type, source, and date.
-3. Open a provider node and choose **Where this came from** to inspect source sessions or messages.
-4. Run `/recall`, select a node, and insert its reference text into the visible composer for review.
-5. Use the node menu to add the same reviewed draft to another existing session.
-6. Export and import map share codes as needed; version 3 and version 4 codes are supported.
-7. With more than one profile, use the profile selector to show several profiles on one map. A memory node's menu offers **Insert into <profile>** for each other selected profile, or **Insert into all selected**.
+| Role | Scope (observer → target) | Meaning |
+|---|---|---|
+| owner | you → you | your own conclusions about yourself |
+| ai | AI peer → you | the assistant's conclusions about you |
+| legacy | old id ↔ you, AI peer → old id | conclusions written under a runtime id that `userPeerAliases` now maps to you |
 
-## Rollback and uninstall
+Other peers in the workspace are not read. The map's provider report lists them as
+"peers not read", so nothing is dropped silently.
 
-Before activation, discard the disposable patched checkout and continue using an unmodified Hermes checkout. Do not stack this patch on another base.
+Three optional settings change that. You can edit them in **Settings → Plugins →
+Journey star map**, with `hermes plugins config journey-starmap`, or in
+`config.yaml`:
 
-If a desktop build made from the patch was installed, stop the affected application, replace it through the normal Hermes installation path, and verify that the replacement uses unmodified upstream source. This package does not automate deployment rollback or user-data restoration.
+```yaml
+plugins:
+  entries:
+    journey-starmap:
+      settings:
+        # Read these too, after the defaults. Typical use: imported chat histories.
+        extra_scopes:
+          - {observer: chatgpt}                    # a peer that observes itself; role defaults to "import"
+          - {observer: meeting-notes, role: import}
+        # Peers you deliberately do not read (test fixtures, other people).
+        exclude_peers: [smoke-test-user]
+        # Or replace the defaults completely, in this exact order:
+        # card_scopes:
+        #   - {observer: alice, target: alice, role: owner}
+        #   - {observer: hermes, target: alice, role: ai}
+        #   - [chatgpt, chatgpt, import]           # the list form works too
+```
 
-## Compatibility and limits
+- `role` is one of `owner`, `ai`, `legacy`, `import`. It sets the card's label and
+  colour.
+- `target` defaults to `observer`. Peer ids are cleaned the same way the Honcho
+  provider cleans them.
+- An entry that cannot be read is skipped and reported in the map's provider report.
+  It is never guessed at.
+- A settings change takes effect on the next load; the card cache never hides it.
 
-- The package supports only upstream commit `7b761da2de4979e424510ca7022bf9527aa65b68`.
-- Provider hooks are optional and best-effort; provider failures produce no provider cards rather than preventing the map from loading.
-- Provider-backed nodes are read-only through Journey.
-- Recall text is framed as untrusted reference data, but that framing is not a complete prompt-injection defense. Review drafts before sending.
-- The package has no configuration or data-schema migration.
-- A merged map shows at most 16 profiles; profiles that do not exist or fail to load are skipped.
-- A cross-profile copy is refused when the target `MEMORY.md` is disabled, full, or the text fails the memory tool's threat scan.
+Without Honcho, the map shows skills and the `MEMORY.md` / `USER.md` cards only.
+
+## How it works
+
+The package has two halves, installed together:
+
+```
+journey-starmap/
+├── plugin.yaml              # manifest (v2): settings schema, requires_hermes
+├── __init__.py              # no-op register(): no tools, no hooks
+├── dashboard/
+│   ├── manifest.json        # mounts the backend at /api/plugins/journey-starmap/
+│   └── plugin_api.py        # FastAPI router (runs in the Hermes plugin host)
+└── desktop/
+    └── plugin.js            # prebuilt desktop half (the app copies it on install/Rescan)
+```
+
+- **Backend.** `GET /graph` calls Hermes's own `build_learning_graph()` for skills and
+  memory files, then adds the Honcho conclusion cards. File-card node ids stay exactly
+  as Hermes assigns them; provider cards follow `memory:<source>:<index>:<fingerprint>`.
+  Every route is profile-scoped through the dashboard's own profile handling. The
+  other routes:
+  - `/health`, `/provider-cards`
+  - `/node/{id}` for `GET`, `PUT` and `DELETE` (provider cards refuse edits)
+  - `/recall-draft`, `/node/cross-insert`, `/provider-session`, `/materialize`
+  - `/session/{id}`, `/sessions/search`, `/sessions/recent`
+- **Desktop half.** A single ES module built from `src/` with esbuild. Its only
+  imports are `@hermes/plugin-sdk`, `react` and `react/jsx-runtime`, which the app
+  provides. It reaches its backend only through the SDK's `ctx.rest`.
+- **Writes.** The plugin writes to disk only when you ask it to:
+  - editing or deleting a skill or memory card;
+  - inserting a memory into another profile, through the memory tool's locked,
+    threat-scanned add;
+  - importing a session with "Recreate as Hermes session".
+
+  It never writes to Honcho.
+
+### Validation
+
+`hermes plugins validate` passes on v0.23.4 with two review notes, both deliberate:
+
+- **Private core imports (catalog rule 9).** The backend calls Hermes's own
+  learning-graph, session, profile and memory-provider functions, so the map matches
+  what Hermes itself knows. Examples are `agent.learning_graph`,
+  `agent.learning_mutations` and `hermes_cli.web_routers.sessions`. These imports are
+  tested against v0.23.3 and v0.23.4. A future Hermes release could rename one, which
+  is why CI runs the test suite against stock Hermes releases.
+- **`window.hermesDesktop` (catalog rule 8).** The plugin uses it once, optionally, to
+  pause the map's animation while the window is minimized. The SDK has no
+  window-state API. Without the bridge the plugin falls back to the standard
+  `visibilitychange` event.
+
+## Develop
+
+The desktop half is prebuilt, so the plugin has no runtime Node dependencies. The build
+tooling's `package.json` lives in `tools/` rather than at the package root, because
+Hermes's installer treats a root `package.json` as runtime dependencies and offers to
+install them. Never put `node_modules` inside `desktop/`: the app copies that folder
+and refuses symlinks in it.
+
+```bash
+npm ci --prefix tools --no-audit --no-fund   # build tooling from the lockfile
+
+node build.mjs              # src/ → desktop/plugin.js
+node build.mjs --register   # run the real register() against a stub ctx
+node build.mjs --smoke      # render the scene against a stub 2D canvas
+node tests/eval-bundle.mjs  # import the shipped bundle with generated stubs
+```
+
+The committed `desktop/plugin.js` is reproducible. In a clean checkout,
+`npm ci --prefix tools && node build.mjs` rebuilds it byte-for-byte, and CI checks this
+on every push. `build.mjs` also finds the tooling in `./node_modules` or in a sibling
+`../journey-starmap-plugin-deps` folder. Those builds give the same code; only
+esbuild's file-path comments change.
+
+Backend tests run inside a Hermes checkout:
+
+```bash
+git clone --depth 1 --branch v0.23.4 https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent && uv sync --frozen --python 3.14 --no-dev && uv pip install pytest
+PYTHONPATH=. .venv/bin/python -m pytest /path/to/journey-starmap/tests -q
+.venv/bin/hermes plugins validate /path/to/journey-starmap
+```
+
+On stock Hermes one test skips by design. It compares the plugin's recall composer
+with a core composer that stock Hermes does not ship.
+
+For live development, link the checkout:
+`ln -s "$PWD" ~/.hermes/plugins/journey-starmap`. The app then re-syncs
+`desktop/plugin.js` on every save. After a backend change, restart the dashboard
+process; after a desktop change, run **Reload desktop plugins** from ⌘K.
+
+`core-port/` keeps the original web-dashboard Star Journey sources for reference. It
+is not built or installed; see [`core-port/README.md`](core-port/README.md).
+
+## Known limits
+
+- The page is **Star map (plugin)** at `/starmap-plugin`. The built-in Journey view
+  and its `/journey` command belong to Hermes and stay as they are.
+- Menu submenus are shown as labelled groups, because the SDK's dropdown has no
+  submenu primitive. Every action is present.
+- In the browser (webapp) build of Hermes Desktop, right-clicking a node can also
+  open the app's own context menu next to the plugin's.
+- Multi-profile views are scoped by profile name. If two connections expose the same
+  profile name, it resolves to the active gateway's backend.
 
 ## Screenshots
 
-Screenshots 01 through 11 under [`docs/screenshots/`](docs/screenshots/) show the map overview, search, provenance, source corpus, and recall flow. Screenshots 12 and 13 show the profile selector and cross-profile insert; they only render with two or more profiles selected, so they are framed on the controls and show no memory content.
+Screenshots 02–13 in [`docs/screenshots/`](docs/screenshots/) were captured with demo
+data from the same feature. They show search, provenance, the source corpus, recall,
+the profile selector and cross-profile insert. In this plugin the page is titled
+**Star map (plugin)**.
 
-## Verification
+## History
 
-Run the package tests from this repository:
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 tests/verify_source.py /path/to/hermes-agent
-```
-
-The second command verifies that the patch reconstructs the declared tree from the pinned base without modifying the source worktree or index.
-
-## License
-
-MIT. See [LICENSE](LICENSE). The source patch retains the upstream project's license terms.
+1.0.0 is the first release as a plugin. Releases 0.3.0 and 0.4.0 shipped the same
+feature as a source patch against one pinned Hermes commit. They remain available as
+the `v0.4.0` tag and are no longer developed. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Credits
 
-Prepared by Hermes (agentic AI assistant) under the direction of Tobias Musser.
+Prepared by a Custom Agentic Assistant built and developed in part by Tobias Musser
+
+## License
+
+MIT. See [LICENSE](LICENSE).

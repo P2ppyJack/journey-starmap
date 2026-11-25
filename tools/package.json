@@ -1,0 +1,23 @@
+{
+  "name": "journey-starmap",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build tooling for the journey-starmap desktop half (not a runtime dependency of the plugin).",
+  "type": "module",
+  "scripts": {
+    "build": "node ../build.mjs",
+    "register": "node ../build.mjs --register",
+    "smoke": "node ../build.mjs --smoke",
+    "eval-bundle": "node ../tests/eval-bundle.mjs"
+  },
+  "devDependencies": {
+    "d3-force": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "fflate": "^0.8.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/P2ppyJack/journey-starmap.git"
+  }
+}

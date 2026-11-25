@@ -9,34 +9,76 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  hermes:
+    name: Validate and test on Hermes ${{ matrix.hermes.tag }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        hermes:
+          - { tag: v0.23.3, commit: caafe5389ae585ef77387a962aee05b1bcf17029 }
+          - { tag: v0.23.4, commit: 8fc0374447313e276f6b9a2764bfc750190c966a }
+    env:
+      HERMES_HOME: ${{ runner.temp }}/hermes-home
     steps:
-      - name: Check out package
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check out the plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: plugin
+          fetch-depth: 0
           persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: "3.13"
-      - name: Check out pinned upstream base
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check out stock Hermes ${{ matrix.hermes.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NousResearch/hermes-agent
-          ref: 7b761da2de4979e424510ca7022bf9527aa65b68
-          path: .source
+          ref: ${{ matrix.hermes.commit }}
+          path: hermes
           fetch-depth: 1
           persist-credentials: false
-      - name: Apply Journey patch
-        run: python patches/apply.py .source
-      - name: Verify resulting tree
+      - name: Install Hermes from its lockfile
+        working-directory: hermes
         run: |
-          test "$(git -C .source rev-parse HEAD)" = "7b761da2de4979e424510ca7022bf9527aa65b68"
-          test "$(git -C .source write-tree)" = "4ba1584dc86292dca24d16b9d6f4ce420467c3bd"
-          git -C .source diff --cached --check
-      - name: Run package tests
-        run: python -m unittest discover -s tests -v
-      - name: Verify package without changing source state
-        run: python tests/verify_source.py .source
+          pipx install "uv==0.13.10"
+          uv --version
+          uv sync --frozen --python 3.14 --no-dev
+          uv pip install pytest
+          .venv/bin/hermes --version
+      - name: hermes plugins validate
+        working-directory: hermes
+        run: .venv/bin/hermes plugins validate "$GITHUB_WORKSPACE/plugin"
+      - name: Backend tests
+        working-directory: hermes
+        run: PYTHONPATH=. .venv/bin/python -m pytest "$GITHUB_WORKSPACE/plugin/tests" -q -rs
+      - name: Install from this checkout the way users do
+        working-directory: hermes
+        run: |
+          .venv/bin/hermes plugins install "file://$GITHUB_WORKSPACE/plugin" --enable 2>&1 | tee install.log
+          if grep -q "declares Node dependencies" install.log; then echo "installer offered build tooling as runtime deps"; exit 1; fi
+          .venv/bin/hermes plugins doctor journey-starmap
+          .venv/bin/hermes plugins list
+
+  desktop:
+    name: Desktop bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies from the lockfile
+        run: npm ci --prefix tools --no-audit --no-fund
+      - name: desktop/plugin.js rebuilds byte-for-byte
+        run: |
+          node build.mjs
+          git diff --exit-code -- desktop/plugin.js
+      - name: register(), scene smoke test and shipped-bundle eval
+        run: |
+          node build.mjs --register
+          node build.mjs --smoke
+          node tests/eval-bundle.mjs
+      - name: Bundle imports only the SDK and React
+        run: |
+          bad=$(grep -oE "from ['\"][^'\"]+['\"]" desktop/plugin.js | sort -u | grep -vE "['\"](@hermes/plugin-sdk|react|react/jsx-runtime)['\"]" || true)
+          if [ -n "$bad" ]; then echo "unexpected imports: $bad"; exit 1; fi

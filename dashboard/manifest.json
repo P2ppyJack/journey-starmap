@@ -1,0 +1,11 @@
+{
+  "name": "journey-starmap",
+  "label": "Journey star map",
+  "description": "Backend for the journey star map: graph, node detail, provenance, recall and provider cards.",
+  "icon": "Sparkles",
+  "version": "1.0.0",
+  "tab": {
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}
