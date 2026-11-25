@@ -185,7 +185,7 @@ def _plugin_settings() -> dict[str, Any]:
     settings); builds without it fall back to ``load_config``.
     """
     try:
-        import hermes_cli.config as hermes_config
+        from hermes_cli import config as hermes_config
 
         reader = getattr(hermes_config, "load_config_readonly", None) or hermes_config.load_config
         config = reader() or {}
@@ -413,7 +413,7 @@ def _settings_key() -> str:
     """Changes whenever the scope settings do, so an edit is never hidden by the cache."""
     try:
         return json.dumps(_plugin_settings(), sort_keys=True, default=str)
-    except Exception:
+    except (TypeError, ValueError):
         return ""
 
 

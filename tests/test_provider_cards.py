@@ -41,8 +41,7 @@ def load_backend(identity=IDENTITY, settings=None, *, raw: bool = False):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if not raw:
-        setattr(module, "_honcho_identity", lambda: identity)
-        setattr(module, "_plugin_settings", lambda: dict(settings or {}))
+        module.__dict__.update(_honcho_identity=lambda: identity, _plugin_settings=lambda: dict(settings or {}))
     return module
 
 
@@ -602,7 +601,7 @@ def test_no_identity_and_no_settings_is_an_explained_empty_read(monkeypatch):
 
 
 def test_settings_are_read_from_the_plugins_entries_block(monkeypatch):
-    import hermes_cli.config as config
+    from hermes_cli import config
 
     module = load_backend(raw=True)
 
