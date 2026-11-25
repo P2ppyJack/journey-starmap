@@ -107,9 +107,10 @@ them out from your own Honcho config (`peerName`, `aiPeer`, `userPeerAliases`):
 Other peers in the workspace are not read. The map's provider report lists them as
 "peers not read", so nothing is dropped silently.
 
-Three optional settings change that. You can edit them in **Settings → Plugins →
-Journey star map**, with `hermes plugins config journey-starmap`, or in
-`config.yaml`:
+Three optional settings change that. You can edit them in the Desktop app under
+**Settings → Plugins → Journey star map**, with `hermes plugins config
+journey-starmap` (Hermes v0.23.4 and later), with `hermes config set` on any
+version, or directly in `config.yaml`:
 
 ```yaml
 plugins:
@@ -127,6 +128,12 @@ plugins:
         #   - {observer: alice, target: alice, role: owner}
         #   - {observer: hermes, target: alice, role: ai}
         #   - [chatgpt, chatgpt, import]           # the list form works too
+```
+
+The same setting from a terminal, on any version:
+
+```bash
+hermes config set plugins.entries.journey-starmap.settings.extra_scopes '[{"observer": "chatgpt"}]'
 ```
 
 - `role` is one of `owner`, `ai`, `legacy`, `import`. It sets the card's label and
@@ -226,8 +233,11 @@ with a core composer that stock Hermes does not ship.
 
 For live development, link the checkout:
 `ln -s "$PWD" ~/.hermes/plugins/journey-starmap`. The app then re-syncs
-`desktop/plugin.js` on every save. After a backend change, restart the dashboard
-process; after a desktop change, run **Reload desktop plugins** from ⌘K.
+`desktop/plugin.js` on every save; after a desktop change, run **Reload desktop
+plugins** from ⌘K. A backend change takes effect only when the process serving the
+plugin's routes restarts. For the Desktop app that is the gateway, so run
+`hermes gateway restart` when no chat is running (the same step the installer asks
+for). A separate `hermes dashboard` serves its own copy and needs its own restart.
 
 `core-port/` keeps the original web-dashboard Star Journey sources for reference. It
 is not built or installed; see [`core-port/README.md`](core-port/README.md).

@@ -6,7 +6,7 @@ First release as a Hermes plugin. The feature from 0.4.0, packaged so that nothi
 
 - Installs with `hermes plugins install https://github.com/P2ppyJack/journey-starmap --enable`. It ships two halves: an agent half (backend router) and a prebuilt desktop half (`desktop/plugin.js`).
 - Runs on stock Hermes v0.23.3 and v0.23.4 (`requires_hermes: ">=0.23.3"`, manifest v2).
-- The Honcho scopes come from the user's own Honcho config: the peer, the AI peer and the runtime ids aliased to the user by `userPeerAliases`. New settings `card_scopes`, `extra_scopes` and `exclude_peers` can replace or extend them, editable in **Settings → Plugins**.
+- The Honcho scopes come from the user's own Honcho config: the peer, the AI peer and the runtime ids aliased to the user by `userPeerAliases`. New settings `card_scopes`, `extra_scopes` and `exclude_peers` can replace or extend them, editable in the Desktop app's **Settings → Plugins**, with `hermes plugins config` (v0.23.4 and later) or with `hermes config set`.
 - The provider report now carries `scope_source` and `settings_warnings`, and a settings change bypasses the five-minute card cache.
 - The injection-hardened recall helpers are part of the plugin, so no core recall helpers are needed.
 - No runtime dependencies. The build tooling's `package.json` lives in `tools/`, so Hermes's installer does not offer to install build tools into the plugin.
